@@ -74,6 +74,7 @@ def run_transfer_learning(
 
     # NOTE: we expect here that all data will fit into memory
     allowed_tokens = get_tokens_from_vocabulary(adapter.vocabulary)
+    logger.info(f"Reading from {smiles_filename}")
     smilies = read_smiles_csv_file(
         smiles_filename, cols, allowed_tokens, actions=actions, remove_duplicates=True
     )

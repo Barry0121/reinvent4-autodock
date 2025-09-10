@@ -46,7 +46,6 @@ dependencies = [
   "mmpdb >=2.1,<3",
   "molvs >=0.1.1,<0.2",
   "numpy >=1.21,<2",
-  "openEye-toolkits >=2022",  # Requires --extra-index-url=https://pypi.anaconda.org/OpenEye/simple
   "pandas >=2,<3",
   "Pillow >=10.0,<11.0",
   "pydantic >=2,<3",
