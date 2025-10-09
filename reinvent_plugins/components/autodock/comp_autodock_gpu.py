@@ -258,13 +258,6 @@ class VinaGPU:
         # Get molecule IDs for all input SMILES
         mol_ids = [self._get_molecule_id(s) for s in smilies]
 
-        print(f"Looking for {len(mol_ids)} molecule IDs")
-        print(f"Sample mol_ids: {mol_ids[:3]}")
-
-        # List all files actually in the directory
-        actual_files = sorted([f.name for f in pdbqt_dir.glob('*.pdbqt')])
-        print(f"Actual files in directory: {actual_files}")
-
         # Process each molecule sequentially
         for i, (mol_id, prepared) in enumerate(zip(mol_ids, preparation_results)):
             if prepared:
@@ -272,14 +265,11 @@ class VinaGPU:
                 pdbqt_path = pdbqt_dir / f"{mol_id}_out.pdbqt"
                 if pdbqt_path.exists():
                     affinities = self._extract_all_affinities(pdbqt_path)
-                    print(f"  {mol_id}: Extracted affinities: {affinities}")
                     if affinities:
                         if aggregate_method == 'mean':
                             results[i] = float(np.mean(affinities))
                         else:
                             raise NotImplementedError("Only mean aggregation is implemented.")
-                else:
-                    print(f"  {mol_id}: FILE NOT FOUND (prepared={prepared})")
 
         return results
 
@@ -303,8 +293,6 @@ class VinaGPU:
             # Step 1: Convert SMILES to PDBQT - track which ones succeeded
             preparation_results = self._prepare_ligand_pdbqt_parallel(smilies, ligand_dir)
 
-            print("Preparation results: ", preparation_results)
-
             # If no molecules were successfully prepared, return all NaN
             if not any(preparation_results):
                 return [np.nan] * len(smilies)
@@ -312,33 +300,11 @@ class VinaGPU:
             # Step 2: Run Batched Vina-GPU docking
             success, _ = self._run_batched_vina_docking(ligand_dir, temp_pose_dir, verbose=False)
 
-            print("Scoring success status: ", success)
-
             if not success:
                 return [np.nan] * len(smilies)
 
-            # Debug: Check what files Vina-GPU created
-            print(f"Checking temp_pose_dir: {temp_pose_dir}")
-            if temp_pose_dir.exists():
-                pdbqt_files = list(temp_pose_dir.glob('*.pdbqt'))
-                print(f"Found {len(pdbqt_files)} PDBQT files in temp_pose_dir")
-                if pdbqt_files:
-                    sample_file = pdbqt_files[0]
-                    print(f"Sample file: {sample_file}")
-                    # Save a copy for debugging
-                    debug_file = Path("/tmp/debug_vina_output.pdbqt")
-                    shutil.copy2(sample_file, debug_file)
-                    print(f"Saved debug copy to: {debug_file}")
-            else:
-                print("temp_pose_dir does not exist!")
-
             # Step 3: Extract affinity from temp pose directory, aligned with input SMILES
             affinity = self._extract_affinity_batch_aligned(temp_pose_dir, smilies, preparation_results)
-
-            print("# of designed for this iteration: ", len(smilies))
-            print('# of affinity output: ', len(affinity))
-            print()
-            print("Scoring output: ", affinity, "\n")
 
 
             # Step 4: Copy successful poses to permanent output location
