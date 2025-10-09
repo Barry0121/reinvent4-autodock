@@ -9,7 +9,7 @@ from __future__ import annotations
 __all__ = ["AutoDockVina"]
 
 import subprocess
-import tempfile
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from typing import List, Optional
 
@@ -18,10 +18,10 @@ from rdkit import Chem
 from rdkit.Chem import AllChem
 from pydantic import Field
 from pydantic.dataclasses import dataclass
+from vina import Vina
 
-from .component_results import ComponentResults
-from .add_tag import add_tag
-
+from ..component_results import ComponentResults
+from ..add_tag import add_tag
 
 @add_tag("__parameters")
 @dataclass
@@ -35,6 +35,8 @@ class Parameters:
     receptor_pdbqt_path: List[str] = Field(
         default_factory=lambda: ["/mnt/data/gpu-server/NR4A1-small-molecule/nr4a1_reinvent/data_cache/6kz5_receptor.pdbqt"]
     )
+    output_dir: List[str] = Field(default_factory=lambda: ["./output/docking_poses"])
+    run_id: List[str] = Field(default_factory=lambda: ["default_run"])
     center_x: List[float] = Field(default_factory=lambda: [1.910])
     center_y: List[float] = Field(default_factory=lambda: [3.831])
     center_z: List[float] = Field(default_factory=lambda: [2.31])
@@ -44,7 +46,21 @@ class Parameters:
     exhaustiveness: List[int] = Field(default_factory=lambda: [8])
     num_modes: List[int] = Field(default_factory=lambda: [9])
     energy_range: List[float] = Field(default_factory=lambda: [3.0])
+    enable_pocket_detection: List[bool] = Field(default_factory=lambda: [False])
 
+
+"""
+NOTE: output directory structure
+outputs/
+└── docking_poses/
+    └── {run_id}/
+        └── vina_cpu/
+            ├── {smiles_hash}_ligand.pdbqt
+            ├── {smiles_hash}_docked.pdbqt
+            └── {smiles_hash}_minimized.pdbqt
+        └── other_scoring_artifacts/
+        └── {run_id}_summary.csv
+"""
 
 @add_tag("__component")
 class AutoDockVina:
@@ -61,6 +77,8 @@ class AutoDockVina:
 
     def __init__(self, params: Parameters):
         self.receptor_path = params.receptor_pdbqt_path[0]
+        self.output_dir = params.output_dir[0]
+        self.run_id = params.run_id[0]
         self.center_x = params.center_x[0]
         self.center_y = params.center_y[0]
         self.center_z = params.center_z[0]
@@ -70,6 +88,7 @@ class AutoDockVina:
         self.exhaustiveness = params.exhaustiveness[0]
         self.num_modes = params.num_modes[0]
         self.energy_range = params.energy_range[0]
+        self.enable_pocket_detection = params.enable_pocket_detection[0]
 
         # Verify receptor file exists
         if not Path(self.receptor_path).exists():
@@ -136,65 +155,74 @@ class AutoDockVina:
             except (subprocess.CalledProcessError, FileNotFoundError):
                 return False
 
-    def _run_vina_docking(self, ligand_pdbqt: Path, output_pdbqt: Path, log_path: Path) -> tuple[bool, str]:
+    def _prepare_ligand_pdbqt_parallel(self, sdf_paths: List[Path], pdbqt_paths: List[Path], max_workers: int = 8) -> List[bool]:
+        """Run ligand preparation in parallel to speedup processing"""
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(self._prepare_ligand_pdbqt, sdf, pdbqt): i
+                for i, (sdf, pdbqt) in enumerate(zip(sdf_paths, pdbqt_paths))
+            }
+            results = [False] * len(sdf_paths)
+            for future in as_completed(futures):
+                idx = futures[future]
+                results[idx] = future.result()
+        return results
+
+    def _run_vina_docking(self, ligand_pdbqt: Path, output_pdbqt: Path) -> tuple[bool, Optional[Path]]:
         """Run AutoDock Vina docking
 
         Returns:
             (success: bool, stdout: str) - success status and stdout content for log parsing
         """
         try:
-            cmd = [
-                "vina",
-                "--receptor", str(self.receptor_path),
-                "--ligand", str(ligand_pdbqt),
-                "--center_x", str(self.center_x),
-                "--center_y", str(self.center_y),
-                "--center_z", str(self.center_z),
-                "--size_x", str(self.size_x),
-                "--size_y", str(self.size_y),
-                "--size_z", str(self.size_z),
-                "--exhaustiveness", str(self.exhaustiveness),
-                "--num_modes", str(self.num_modes),
-                "--energy_range", str(self.energy_range),
-                "--out", str(output_pdbqt)
-            ]
+            v = Vina(sf_name="vina")
+            v.set_receptor(self.receptor_path)
+            v.set_ligand_from_file(str(ligand_pdbqt))
+            v.compute_vina_maps(
+                center=[self.center_x, self.center_y, self.center_z],
+                box_size=[self.size_x, self.size_y, self.size_z]
+            )
 
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)  # 5 min timeout
+            v.optimize()
+            v.dock(exhaustiveness=self.exhaustiveness, n_poses=self.num_modes)
+            v.write_poses(str(output_pdbqt), n_poses=self.num_modes, overwrite=True)
 
-            if result.returncode == 0:
-                # Save output to log file for debugging
-                with open(log_path, 'w') as f:
-                    f.write(result.stdout)
-                return True, result.stdout
-            else:
-                return False, result.stderr
+            return True, output_pdbqt
 
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
-            return False, ""
+            return False, None
 
-    def _extract_affinity(self, log_content: str) -> Optional[float]:
-        """Extract best binding affinity from Vina output
+    def _extract_affinity(self, pdbqt_path: Path, aggregate_method: str = 'mean') -> Optional[float]:
+        """Extract best binding affinity from Vina prediction (.pdbqt).
 
         Args:
             log_content: The stdout content from Vina
         """
         try:
-            lines = log_content.split('\n')
-            for line in lines:
-                stripped = line.strip()
-                # Look for the first scoring line (mode 1)
-                if stripped.startswith('1') and len(stripped.split()) >= 2:
-                    parts = stripped.split()
-                    try:
-                        # Second column should be the affinity
-                        affinity = float(parts[1])
-                        return affinity
-                    except (ValueError, IndexError):
-                        continue
-            return None
+            affinities = self._extract_all_affinities(pdbqt_path=pdbqt_path)
+
+            if aggregate_method == 'mean':
+                return float(np.mean(affinities))
+            else:
+                raise NotImplementedError("Only mean aggregation is implemented.")
+
 
         except Exception:
             return None
+
+    def _extract_all_affinities(self, pdbqt_path: Path) -> List[float]:
+        """Extract all pose affinities from PDBQT file"""
+        affinities = []
+        try:
+            with open(pdbqt_path, 'r') as f:
+                for line in f:
+                    if line.startswith('REMARK VINA RESULT:'):
+                        parts = line.split()
+                        if len(parts) >= 4:
+                            affinities.append(float(parts[3]))
+            return affinities
+        except Exception:
+            return []
 
     def _transform_to_score(self, affinity: float, min_affinity: float = -20.0, max_affinity: float = 0.0) -> float:
         clamped = max(min_affinity, min(max_affinity, affinity))
@@ -208,7 +236,6 @@ class AutoDockVina:
             ligand_sdf = temp_dir / f"ligand_{hash(smiles) % 10000}.sdf"
             ligand_pdbqt = temp_dir / f"ligand_{hash(smiles) % 10000}.pdbqt"
             output_pdbqt = temp_dir / f"output_{hash(smiles) % 10000}.pdbqt"
-            log_file = temp_dir / f"docking_{hash(smiles) % 10000}.log"
 
             # Step 1: Convert SMILES to SDF
             if not self._smiles_to_sdf(smiles, ligand_sdf):
@@ -219,17 +246,17 @@ class AutoDockVina:
                 return np.nan
 
             # Step 3: Run Vina docking
-            success, log_content = self._run_vina_docking(ligand_pdbqt, output_pdbqt, log_file)
+            success, output_path = self._run_vina_docking(ligand_pdbqt, output_pdbqt)
             if not success:
                 return np.nan
 
             # Step 4: Extract affinity from log content
-            affinity = self._extract_affinity(log_content)
+            affinity = self._extract_affinity(output_path)
 
             # Step 5: Transform affinity into a score
-            score = self._transform_to_score(affinity=affinity) if affinity is not None else np.nan
+            # score = self._transform_to_score(affinity=affinity) if affinity is not None else np.nan
 
-            return score
+            return affinity
 
         except Exception:
             return np.nan
@@ -244,14 +271,12 @@ class AutoDockVina:
             ComponentResults containing binding affinities (kcal/mol)
             More negative values indicate better binding
         """
+        pose_dir = Path(self.output_dir) / self.run_id / "vina_cpu"
+        pose_dir.mkdir(parents=True, exist_ok=True)
         scores = []
 
-        # Use temporary directory for all docking operations
-        with tempfile.TemporaryDirectory(prefix="vina_scoring_") as temp_dir:
-            temp_path = Path(temp_dir)
-
-            for smiles in smilies:
-                score = self._score_single_molecule(smiles, temp_path)
-                scores.append(score)
+        for smiles in smilies:
+            score = self._score_single_molecule(smiles, pose_dir)
+            scores.append(score)
 
         return ComponentResults([np.array(scores, dtype=float)])
