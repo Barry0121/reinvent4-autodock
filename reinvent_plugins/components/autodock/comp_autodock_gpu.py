@@ -7,6 +7,7 @@ from __future__ import annotations
 
 __all__ = ["VinaGPU"]
 
+import logging
 import shutil
 import subprocess
 import tempfile
@@ -19,6 +20,8 @@ from rdkit import Chem
 from rdkit.Chem import AllChem, MolToInchiKey
 from pydantic import Field
 from pydantic.dataclasses import dataclass
+
+logger = logging.getLogger("reinvent")
 
 from ..component_results import ComponentResults
 from ..add_tag import add_tag
@@ -203,23 +206,48 @@ class VinaGPU:
                 "--num_modes", str(self.num_modes),
                 "--energy_range", str(self.energy_range),
             ]
+            if verbose:
+                print(f"Running command: {' '.join(cmd)}")
+                print(f"Working directory: {self.opencl_binary_path + '/' + 'AutoDock-Vina-GPU-2-1'}")
 
-            process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                bufsize=1,
-                cwd=str(self.opencl_binary_path)
-            )
-            if process.stdout is not None and verbose:
-                for line in process.stdout:
-                    print(line, end=" ")
-            process.wait()
+            if verbose:
+                # Direct output to terminal - preserves progress bars
+                process = subprocess.Popen(
+                    cmd,
+                    stdout=None,  # Inherit stdout from parent
+                    stderr=None,  # Inherit stderr from parent
+                    cwd=str(self.opencl_binary_path)
+                )
+            else:
+                # Capture output silently
+                process = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    cwd=str(self.opencl_binary_path)
+                )
+
+            return_code = process.wait(timeout=600)
+
+            if return_code != 0:
+                if not verbose:
+                    # Only now show errors if something went wrong
+                    stdout, stderr = process.communicate()
+                    print(f"Process failed with code {return_code}")
+                    if stderr:
+                        print(f"STDERR: {stderr}")
+                return False, None
 
             return True, pose_dir
 
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
+        except subprocess.TimeoutExpired:
+            print("\nERROR: Process timeout!")
+            process.kill()
+            return False, None
+        except Exception as e:
+            print(f"\nERROR: {e}")
+            import traceback
+            traceback.print_exc()
             return False, None
 
 
@@ -295,12 +323,14 @@ class VinaGPU:
 
             # If no molecules were successfully prepared, return all NaN
             if not any(preparation_results):
+                logger.warning("No molecules were sucessfully prepared...")
                 return [np.nan] * len(smilies)
 
             # Step 2: Run Batched Vina-GPU docking
-            success, _ = self._run_batched_vina_docking(ligand_dir, temp_pose_dir, verbose=False)
+            success, _ = self._run_batched_vina_docking(ligand_dir, temp_pose_dir, verbose=True)
 
             if not success:
+                logger.warning("Vina-GPU docking failed...")
                 return [np.nan] * len(smilies)
 
             # Step 3: Extract affinity from temp pose directory, aligned with input SMILES
@@ -312,7 +342,8 @@ class VinaGPU:
 
             return affinity
 
-        except Exception:
+        except Exception as e:
+            logger.info("Got exception during Vina-GPU docking:\t", e)
             return [np.nan] * len(smilies)
 
     def _copy_latest_poses(self, temp_pose_dir: Path, output_pose_dir: Path, smilies: List[str], affinities: Optional[List[float]]):
@@ -347,7 +378,7 @@ class VinaGPU:
                         shutil.copy2(pose_file, output_pose_dir / f"{mol_id}.pdbqt")
         except Exception as e:
             # Don't fail the whole scoring if copying fails
-            print(f"Warning: Failed to copy poses to output directory: {e}")
+            logging.warning(f"Warning: Failed to copy poses to output directory: {e}")
 
     def __call__(self, smilies: List[str]) -> ComponentResults:
         """Score a list of SMILES using Vina docking

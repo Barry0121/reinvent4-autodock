@@ -10,7 +10,7 @@ from reinvent.scoring.transforms import RightStep
 from reinvent.scoring.transforms import Step
 from reinvent.scoring.transforms import ValueMapping
 from reinvent.scoring.transforms import ExponentialDecay
-
+from reinvent.scoring.transforms import AffinityNormalization
 
 @pytest.mark.parametrize(
     "low, high, coef_div, coef_si, coef_se",
@@ -140,3 +140,34 @@ def test_exponential_decay(k):
     assert np.all(results >= 0.0)
     assert results[0] == 1.0
     assert results[-1] <= 0.01
+
+@pytest.mark.parametrize("worst, best", [(0.0, -20.0)])
+def test_affinity_norm(worst, best):
+    from reinvent.scoring.transforms.affinity_norm import Parameters
+
+    data = np.linspace(-20, 20, 21, dtype=np.float32)
+    params = Parameters(
+        type="",
+        worst_affinity=worst,
+        best_affinity=best
+    )
+    transform = AffinityNormalization(params)
+    results = transform(data)
+
+    # Test specific values
+    assert results[0] == 1.0  # best_affinity (-20) should map to 1.0
+    test_worst = transform(np.array([worst]))
+    assert test_worst[0] == 0.0  # worst_affinity (0) should map to 0.0
+    test_mid = transform(np.array([(best + worst) / 2]))
+    assert np.isclose(test_mid[0], 0.5)  # midpoint (-10) should map to 0.5
+
+    # Test monotonicity: as affinity gets worse (more positive), score decreases
+    assert np.all(np.diff(results) <= 0)
+
+    # Test range validation
+    assert np.all(results <= 1.0)
+    assert np.all(results >= 0.0)
+
+    # Test clipping: values beyond worst_affinity should clip to 0.0
+    beyond_worst = transform(np.array([10.0, 20.0]))
+    assert np.all(beyond_worst == 0.0)

@@ -8,3 +8,4 @@ from .sigmoids import *
 from .double_sigmoid import *
 from .value_mapping import *
 from .exponential_decay import *
+from .affinity_norm import * 
