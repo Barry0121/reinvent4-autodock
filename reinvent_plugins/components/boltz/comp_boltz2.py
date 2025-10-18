@@ -34,12 +34,14 @@ class Parameters:
     multiple endpoints, even if only one is used.
     """
 
-    # Receptor configuration
-    receptor_sequence: List[str] = Field(
-        default_factory=lambda: ["MVTPEGNVSLVDESLLVGVTDEDRAVRSAHQFYERLIGLWAPAVMEAAHELGVFAALAEAPADSGELARRLDCDARAMRVLLDALYAYDVIDRIHDTNGFRYLLSAEARECLLPGTLFSLVGKFMHDINVAWPAWRNLAEVVRHGARDTSGAESPNGIAQEDYESLVGGINFWAPPIVTTLSRKLRASGRSGDATASVLDVGCGTGLYSQLLLREFPRWTATGLDVERIATLANAQALRLGVEERFATRAGDFWRGGWGTGYDLVLFANIFHLQTPASAVRLMRHAAACLAPDGLVAVVDQIVDADREPKTPQDRFALLFAASMTNTGGGDAYTFQEYEEWFTAAGLQRIETLDTPMHRILLARRATEPSAVPEGQASENLYFQ"]
+    # Receptor configuration - supports multiple protein chains
+    # Each endpoint is a list, and each protein chain within an endpoint is specified
+    # Example: [["SEQUENCE1", "SEQUENCE2"]] for two chains in one endpoint
+    receptor_sequences: List[List[str]] = Field(
+        default_factory=lambda: [["MVTPEGNVSLVDESLLVGVTDEDRAVRSAHQFYERLIGLWAPAVMEAAHELGVFAALAEAPADSGELARRLDCDARAMRVLLDALYAYDVIDRIHDTNGFRYLLSAEARECLLPGTLFSLVGKFMHDINVAWPAWRNLAEVVRHGARDTSGAESPNGIAQEDYESLVGGINFWAPPIVTTLSRKLRASGRSGDATASVLDVGCGTGLYSQLLLREFPRWTATGLDVERIATLANAQALRLGVEERFATRAGDFWRGGWGTGYDLVLFANIFHLQTPASAVRLMRHAAACLAPDGLVAVVDQIVDADREPKTPQDRFALLFAASMTNTGGGDAYTFQEYEEWFTAAGLQRIETLDTPMHRILLARRATEPSAVPEGQASENLYFQ"]]
     )
-    receptor_chain_id: List[str] = Field(default_factory=lambda: ["A"])
-    receptor_msa_path: List[Optional[str]] = Field(default_factory=lambda: [None])
+    receptor_chain_ids: List[List[str]] = Field(default_factory=lambda: [["A"]])
+    receptor_msa_paths: List[List[Optional[str]]] = Field(default_factory=lambda: [[None]])
     ligand_chain_id: List[str] = Field(default_factory=lambda: ["B"])
 
     # Output configuration
@@ -80,24 +82,33 @@ class Parameters:
     no_kernels: List[bool] = Field(default_factory=lambda: [False])
     override: List[bool] = Field(default_factory=lambda: [True])
 
+    # Metrics to extract and return
+    # Available metrics: affinity_probability_binary, affinity_pred_value, plddt, ptm, iptm
+    primary_metric: List[str] = Field(default_factory=lambda: ["affinity_probability_binary"])
+    additional_metrics: List[List[str]] = Field(
+        default_factory=lambda: [["affinity_pred_value", "plddt", "ptm"]]
+    )
+
 
 @add_tag("__component")
 class Boltz2:
     """Boltz2 structure prediction and affinity scoring component
 
-    This component:
-    1. Creates YAML input files for each SMILES
+    This component supports multi-chain protein complexes and:
+    1. Creates YAML input files for each SMILES with multiple protein chains
     2. Runs Boltz2 prediction in batch mode
     3. Extracts binding affinity predictions
     4. Returns affinity probability binary as the score
 
+    Supports multiple protein chains per complex (e.g., heterodimers, trimers, etc.)
     Returns affinity probability binary (0-1, higher = better binding)
     """
 
     def __init__(self, params: Parameters):
-        self.receptor_sequence = params.receptor_sequence[0]
-        self.receptor_chain_id = params.receptor_chain_id[0]
-        self.receptor_msa_path = params.receptor_msa_path[0]
+        # Support multiple protein chains
+        self.receptor_sequences = params.receptor_sequences[0]  # List of sequences
+        self.receptor_chain_ids = params.receptor_chain_ids[0]  # List of chain IDs
+        self.receptor_msa_paths = params.receptor_msa_paths[0]  # List of MSA paths (can be None)
         self.ligand_chain_id = params.ligand_chain_id[0]
 
         self.output_dir = params.output_dir[0]
@@ -137,6 +148,10 @@ class Boltz2:
         self.no_kernels = params.no_kernels[0]
         self.override = params.override[0]
 
+        # Metrics configuration
+        self.primary_metric = params.primary_metric[0]
+        self.additional_metrics = params.additional_metrics[0]
+
     def _get_molecule_id(self, smiles: str) -> str:
         """Generate unique molecule ID from SMILES"""
         try:
@@ -156,23 +171,36 @@ class Boltz2:
             True if successful, False otherwise
         """
         try:
-            # Build the YAML structure
+            # Build the YAML structure with multiple protein chains
+            sequences = []
+
+            # Add all protein chains
+            for i, (chain_id, sequence) in enumerate(zip(self.receptor_chain_ids, self.receptor_sequences)):
+                protein_entry = {
+                    "protein": {
+                        "id": chain_id,
+                        "sequence": sequence,
+                    }
+                }
+
+                # Add MSA path if provided for this chain
+                msa_path = self.receptor_msa_paths[i]
+                if msa_path is not None:
+                    protein_entry["protein"]["msa"] = msa_path
+
+                sequences.append(protein_entry)
+
+            # Add ligand
+            sequences.append({
+                "ligand": {
+                    "id": self.ligand_chain_id,
+                    "smiles": smiles
+                }
+            })
+
             yaml_data = {
                 "version": 1,
-                "sequences": [
-                    {
-                        "protein": {
-                            "id": self.receptor_chain_id,
-                            "sequence": self.receptor_sequence,
-                        }
-                    },
-                    {
-                        "ligand": {
-                            "id": self.ligand_chain_id,
-                            "smiles": smiles
-                        }
-                    }
-                ],
+                "sequences": sequences,
                 "properties": [
                     {
                         "affinity": {
@@ -181,10 +209,6 @@ class Boltz2:
                     }
                 ]
             }
-
-            # Add MSA path if provided
-            if self.receptor_msa_path:
-                yaml_data["sequences"][0]["protein"]["msa"] = self.receptor_msa_path
 
             # Write YAML file
             with open(yaml_path, 'w') as f:
@@ -294,6 +318,48 @@ class Boltz2:
         except (subprocess.CalledProcessError, FileNotFoundError):
             return False
 
+    def _extract_structure_metrics(self, prediction_dir: Path, mol_id: str) -> Optional[Dict[str, float]]:
+        """Extract structure confidence metrics from Boltz2 output
+
+        Args:
+            prediction_dir: Directory containing Boltz2 predictions
+            mol_id: Molecule ID
+
+        Returns:
+            Dictionary with structure metrics (plddt, ptm, iptm), or None if not found
+        """
+        try:
+            # Boltz2 saves confidence metrics in predictions/{input_name}/confidence_{input_name}.json
+            confidence_file = prediction_dir / "predictions" / mol_id / f"confidence_{mol_id}.json"
+
+            if not confidence_file.exists():
+                return {}
+
+            with open(confidence_file, 'r') as f:
+                confidence_data = json.load(f)
+
+            metrics = {}
+            # Extract mean pLDDT (per-residue confidence)
+            if "plddt" in confidence_data:
+                plddt_values = confidence_data["plddt"]
+                if isinstance(plddt_values, list):
+                    metrics["plddt"] = float(np.mean(plddt_values))
+                else:
+                    metrics["plddt"] = float(plddt_values)
+
+            # Extract pTM (predicted TM-score)
+            if "ptm" in confidence_data:
+                metrics["ptm"] = float(confidence_data["ptm"])
+
+            # Extract ipTM (interface predicted TM-score)
+            if "iptm" in confidence_data:
+                metrics["iptm"] = float(confidence_data["iptm"])
+
+            return metrics
+
+        except Exception:
+            return {}
+
     def _extract_affinity(self, prediction_dir: Path, mol_id: str) -> Optional[Dict[str, float]]:
         """Extract affinity predictions from Boltz2 output
 
@@ -309,7 +375,7 @@ class Boltz2:
             affinity_file = prediction_dir / "predictions" / mol_id / f"affinity_{mol_id}.json"
 
             if not affinity_file.exists():
-                return None
+                return {}
 
             with open(affinity_file, 'r') as f:
                 affinity_data = json.load(f)
@@ -320,11 +386,35 @@ class Boltz2:
             }
 
         except Exception:
-            return None
+            return {}
 
-    def _extract_affinities_aligned(self, prediction_dir: Path, smilies: List[str],
-                                   preparation_results: List[bool]) -> tuple[List[float], List[float]]:
-        """Extract affinities aligned with input SMILES list
+    def _extract_all_metrics(self, prediction_dir: Path, mol_id: str) -> Optional[Dict[str, float]]:
+        """Extract all available metrics from Boltz2 output
+
+        Args:
+            prediction_dir: Directory containing Boltz2 predictions
+            mol_id: Molecule ID
+
+        Returns:
+            Dictionary with all available metrics, or None if no metrics found
+        """
+        all_metrics = {}
+
+        # Extract affinity metrics
+        affinity_metrics = self._extract_affinity(prediction_dir, mol_id)
+        if affinity_metrics:
+            all_metrics.update(affinity_metrics)
+
+        # Extract structure metrics
+        structure_metrics = self._extract_structure_metrics(prediction_dir, mol_id)
+        if structure_metrics:
+            all_metrics.update(structure_metrics)
+
+        return all_metrics if all_metrics else None
+
+    def _extract_metrics_aligned(self, prediction_dir: Path, smilies: List[str],
+                                preparation_results: List[bool]) -> Dict[str, List[float]]:
+        """Extract all metrics aligned with input SMILES list
 
         Args:
             prediction_dir: Directory containing Boltz2 predictions
@@ -332,21 +422,23 @@ class Boltz2:
             preparation_results: Boolean list indicating which molecules were successfully prepared
 
         Returns:
-            Tuple of (affinity_probability_binary list, affinity_pred_value list)
+            Dictionary mapping metric names to lists of values
         """
-        binary_scores = [np.nan] * len(smilies)
-        pred_values = [np.nan] * len(smilies)
+        # Initialize all possible metrics
+        all_metric_names = ["affinity_probability_binary", "affinity_pred_value", "plddt", "ptm", "iptm"]
+        metrics_dict = {metric: [np.nan] * len(smilies) for metric in all_metric_names}
 
         mol_ids = [self._get_molecule_id(s) for s in smilies]
 
         for i, (mol_id, prepared) in enumerate(zip(mol_ids, preparation_results)):
             if prepared:
-                affinity_data = self._extract_affinity(prediction_dir, mol_id)
-                if affinity_data:
-                    binary_scores[i] = affinity_data["affinity_probability_binary"]
-                    pred_values[i] = affinity_data["affinity_pred_value"]
+                all_metrics = self._extract_all_metrics(prediction_dir, mol_id)
+                if all_metrics:
+                    for metric_name, value in all_metrics.items():
+                        if metric_name in metrics_dict:
+                            metrics_dict[metric_name][i] = value
 
-        return binary_scores, pred_values
+        return metrics_dict
 
     def _copy_latest_predictions(self, temp_pred_dir: Path, output_pred_dir: Path,
                                 smilies: List[str], binary_scores: List[float]):
@@ -378,7 +470,7 @@ class Boltz2:
         except Exception as e:
             print(f"Warning: Failed to copy predictions to output directory: {e}")
 
-    def _score_molecules(self, smilies: List[str], out_dir: Path, temp_dir: Path):
+    def _score_molecules(self, smilies: List[str], out_dir: Path, temp_dir: Path) -> Dict[str, List[float]]:
         """Score molecules using Boltz2 prediction
 
         Args:
@@ -387,7 +479,7 @@ class Boltz2:
             temp_dir: Temporary directory for operations
 
         Returns:
-            ComponentResults with binary scores and pred values as metadata
+            Dictionary mapping metric names to lists of values
         """
         try:
             # Create input directory for YAML files
@@ -398,31 +490,45 @@ class Boltz2:
             preparation_results = self._create_yaml_inputs_parallel(smilies, input_dir)
 
             if not any(preparation_results):
-                return [np.nan] * len(smilies), [np.nan] * len(smilies)
+                return self._get_empty_metrics(len(smilies))
 
             # Step 2: Run Boltz2 prediction
             success = self._run_boltz2_prediction(input_dir, temp_out_dir)
 
             if not success:
-                return [np.nan] * len(smilies), [np.nan] * len(smilies)
+                return self._get_empty_metrics(len(smilies))
 
-            # Step 3: Extract affinity scores
-            binary_scores, pred_values = self._extract_affinities_aligned(
+            # Step 3: Extract all metrics
+            metrics_dict = self._extract_metrics_aligned(
                 temp_out_dir, smilies, preparation_results
             )
 
             # Step 4: Copy successful predictions to permanent output
+            # Use primary metric for determining success
+            primary_scores = metrics_dict.get(self.primary_metric, [np.nan] * len(smilies))
             self._copy_latest_predictions(
                 temp_out_dir,
                 out_dir / "boltz_pose",
                 smilies,
-                binary_scores
+                primary_scores
             )
 
-            return binary_scores, pred_values
+            return metrics_dict
 
         except Exception:
-            return [np.nan] * len(smilies), [np.nan] * len(smilies)
+            return self._get_empty_metrics(len(smilies))
+
+    def _get_empty_metrics(self, n_molecules: int) -> Dict[str, List[float]]:
+        """Get empty metrics dictionary for failed predictions
+
+        Args:
+            n_molecules: Number of molecules
+
+        Returns:
+            Dictionary with NaN values for all metrics
+        """
+        all_metric_names = ["affinity_probability_binary", "affinity_pred_value", "plddt", "ptm", "iptm"]
+        return {metric: [np.nan] * n_molecules for metric in all_metric_names}
 
     def __call__(self, smilies: List[str]) -> ComponentResults:
         """Score a list of SMILES using Boltz2 prediction
@@ -432,8 +538,16 @@ class Boltz2:
 
         Returns:
             ComponentResults containing:
-            - Primary score: affinity_probability_binary (0-1, higher = better binding)
-            - Metadata: affinity_pred_value (log10(IC50))
+            - Primary score: configured primary metric (default: affinity_probability_binary)
+            - Additional scores: can be configured to include other metrics as separate scores
+            - Metadata: all additional configured metrics
+
+        Example metrics:
+            - affinity_probability_binary: 0-1, higher = better binding
+            - affinity_pred_value: log10(IC50)
+            - plddt: mean per-residue confidence (0-100)
+            - ptm: predicted TM-score (0-1)
+            - iptm: interface predicted TM-score (0-1)
         """
         # Permanent storage location
         out_dir = Path(self.output_dir) / self.run_id
@@ -442,10 +556,24 @@ class Boltz2:
         # Create temporary directory for operations
         with tempfile.TemporaryDirectory() as temp_dir_str:
             temp_dir = Path(temp_dir_str)
-            binary_scores, pred_values = self._score_molecules(smilies, out_dir, temp_dir)
+            metrics_dict = self._score_molecules(smilies, out_dir, temp_dir)
 
-        # Return ComponentResults with binary scores as primary and pred_values as metadata
-        results = ComponentResults([np.array(binary_scores, dtype=float)])
-        results.set_metadata("boltz_pred_affinity", np.array(pred_values, dtype=float))
+        # Get primary metric scores
+        primary_scores = metrics_dict.get(self.primary_metric, [np.nan] * len(smilies))
+
+        # Build scores list - primary metric is always first
+        scores = [np.array(primary_scores, dtype=float)]
+
+        # Build metadata dictionary with additional metrics
+        metadata = {}
+        for metric_name in self.additional_metrics:
+            if metric_name in metrics_dict:
+                metadata[f"boltz_{metric_name}"] = metrics_dict[metric_name]
+
+        # Create ComponentResults with primary metric and metadata
+        results = ComponentResults(
+            scores=scores,
+            metadata=metadata if metadata else None
+        )
 
         return results
