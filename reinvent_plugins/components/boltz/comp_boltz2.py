@@ -6,13 +6,14 @@ from __future__ import annotations
 
 __all__ = ["Boltz2"]
 
+import importlib
 import json
 import shutil
 import subprocess
 import tempfile
 import yaml
 from pathlib import Path
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Callable
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import numpy as np
@@ -89,6 +90,13 @@ class Parameters:
         default_factory=lambda: [["affinity_pred_value", "plddt", "ptm"]]
     )
 
+    # Custom metric functions
+    # List of Python module paths to custom metric functions
+    # Example: ["mypackage.metrics.custom_rmsd", "mypackage.metrics.contact_count"]
+    custom_metric_functions: List[List[str]] = Field(default_factory=lambda: [[]])
+    # Names for custom metrics (must match length of custom_metric_functions)
+    custom_metric_names: List[List[str]] = Field(default_factory=lambda: [[]])
+
 
 @add_tag("__component")
 class Boltz2:
@@ -151,6 +159,17 @@ class Boltz2:
         # Metrics configuration
         self.primary_metric = params.primary_metric[0]
         self.additional_metrics = params.additional_metrics[0]
+
+        # Custom metrics configuration
+        self.custom_metric_functions = params.custom_metric_functions[0]
+        self.custom_metric_names = params.custom_metric_names[0]
+
+        # Validate custom metrics configuration
+        if len(self.custom_metric_functions) != len(self.custom_metric_names):
+            raise ValueError(
+                f"custom_metric_functions and custom_metric_names must have the same length. "
+                f"Got {len(self.custom_metric_functions)} functions and {len(self.custom_metric_names)} names"
+            )
 
     def _get_molecule_id(self, smiles: str) -> str:
         """Generate unique molecule ID from SMILES"""
@@ -388,12 +407,73 @@ class Boltz2:
         except Exception:
             return {}
 
-    def _extract_all_metrics(self, prediction_dir: Path, mol_id: str) -> Optional[Dict[str, float]]:
+    def _load_custom_function(self, function_path: str) -> Optional[Callable]:
+        """Dynamically load a custom metric function from a module path
+
+        Args:
+            function_path: Full module path to function (e.g., "mypackage.metrics.my_function")
+
+        Returns:
+            Callable function or None if loading fails
+        """
+        try:
+            # Split module path and function name
+            module_path, function_name = function_path.rsplit('.', 1)
+
+            # Import module and get function
+            module = importlib.import_module(module_path)
+            return getattr(module, function_name)
+
+        except (ImportError, AttributeError, ValueError) as e:
+            print(f"Warning: Failed to load custom metric function '{function_path}': {e}")
+            return None
+
+    def _extract_custom_metrics(self, prediction_dir: Path, mol_id: str, smiles: str) -> Dict[str, float]:
+        """Extract custom metrics using user-provided functions
+
+        Args:
+            prediction_dir: Directory containing Boltz2 predictions
+            mol_id: Molecule ID
+            smiles: Input SMILES string
+
+        Returns:
+            Dictionary with custom metric values
+        """
+        custom_metrics = {}
+
+        for func_path, metric_name in zip(self.custom_metric_functions, self.custom_metric_names):
+            try:
+                # Load the custom function
+                custom_func = self._load_custom_function(func_path)
+
+                if custom_func is None:
+                    custom_metrics[metric_name] = np.nan
+                    continue
+
+                # Call the custom function
+                # Function signature: (prediction_dir: Path, mol_id: str, smiles: str) -> float
+                metric_value = custom_func(prediction_dir, mol_id, smiles)
+
+                # Validate and store
+                if isinstance(metric_value, (int, float)):
+                    custom_metrics[metric_name] = float(metric_value)
+                else:
+                    print(f"Warning: Custom metric '{metric_name}' returned non-numeric value: {type(metric_value)}")
+                    custom_metrics[metric_name] = np.nan
+
+            except Exception as e:
+                print(f"Warning: Error computing custom metric '{metric_name}': {e}")
+                custom_metrics[metric_name] = np.nan
+
+        return custom_metrics
+
+    def _extract_all_metrics(self, prediction_dir: Path, mol_id: str, smiles: str = "") -> Optional[Dict[str, float]]:
         """Extract all available metrics from Boltz2 output
 
         Args:
             prediction_dir: Directory containing Boltz2 predictions
             mol_id: Molecule ID
+            smiles: Input SMILES string (for custom metrics)
 
         Returns:
             Dictionary with all available metrics, or None if no metrics found
@@ -410,6 +490,12 @@ class Boltz2:
         if structure_metrics:
             all_metrics.update(structure_metrics)
 
+        # Extract custom metrics
+        if self.custom_metric_functions:
+            custom_metrics = self._extract_custom_metrics(prediction_dir, mol_id, smiles)
+            if custom_metrics:
+                all_metrics.update(custom_metrics)
+
         return all_metrics if all_metrics else None
 
     def _extract_metrics_aligned(self, prediction_dir: Path, smilies: List[str],
@@ -424,15 +510,22 @@ class Boltz2:
         Returns:
             Dictionary mapping metric names to lists of values
         """
-        # Initialize all possible metrics
+        # Initialize built-in metrics
         all_metric_names = ["affinity_probability_binary", "affinity_pred_value", "plddt", "ptm", "iptm"]
+
+        # Add custom metric names
+        if self.custom_metric_names:
+            all_metric_names.extend(self.custom_metric_names)
+
+        # Initialize all metrics with NaN
         metrics_dict = {metric: [np.nan] * len(smilies) for metric in all_metric_names}
 
         mol_ids = [self._get_molecule_id(s) for s in smilies]
 
-        for i, (mol_id, prepared) in enumerate(zip(mol_ids, preparation_results)):
+        for i, (mol_id, smiles, prepared) in enumerate(zip(mol_ids, smilies, preparation_results)):
             if prepared:
-                all_metrics = self._extract_all_metrics(prediction_dir, mol_id)
+                # Pass SMILES to _extract_all_metrics for custom metrics
+                all_metrics = self._extract_all_metrics(prediction_dir, mol_id, smiles)
                 if all_metrics:
                     for metric_name, value in all_metrics.items():
                         if metric_name in metrics_dict:
@@ -527,7 +620,13 @@ class Boltz2:
         Returns:
             Dictionary with NaN values for all metrics
         """
+        # Built-in metrics
         all_metric_names = ["affinity_probability_binary", "affinity_pred_value", "plddt", "ptm", "iptm"]
+
+        # Add custom metrics
+        if self.custom_metric_names:
+            all_metric_names.extend(self.custom_metric_names)
+
         return {metric: [np.nan] * n_molecules for metric in all_metric_names}
 
     def __call__(self, smilies: List[str]) -> ComponentResults:
