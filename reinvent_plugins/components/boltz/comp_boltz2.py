@@ -36,13 +36,13 @@ class Parameters:
     """
 
     # Receptor configuration - supports multiple protein chains
-    # Each endpoint is a list, and each protein chain within an endpoint is specified
-    # Example: [["SEQUENCE1", "SEQUENCE2"]] for two chains in one endpoint
+    # Format: List of sequences, chain IDs, and MSA paths (one per chain)
+    # Example: ["SEQUENCE1", "SEQUENCE2"] for two chains
     receptor_sequences: List[List[str]] = Field(
-        default_factory=lambda: [["MVTPEGNVSLVDESLLVGVTDEDRAVRSAHQFYERLIGLWAPAVMEAAHELGVFAALAEAPADSGELARRLDCDARAMRVLLDALYAYDVIDRIHDTNGFRYLLSAEARECLLPGTLFSLVGKFMHDINVAWPAWRNLAEVVRHGARDTSGAESPNGIAQEDYESLVGGINFWAPPIVTTLSRKLRASGRSGDATASVLDVGCGTGLYSQLLLREFPRWTATGLDVERIATLANAQALRLGVEERFATRAGDFWRGGWGTGYDLVLFANIFHLQTPASAVRLMRHAAACLAPDGLVAVVDQIVDADREPKTPQDRFALLFAASMTNTGGGDAYTFQEYEEWFTAAGLQRIETLDTPMHRILLARRATEPSAVPEGQASENLYFQ"]]
+        default_factory=lambda: [["MVTPEGNVSLVDESLLVGVTDEDRAVRSAHQFYERLIGLWAPAVMEAAHELGVFAALAEAPADSGELARRLDCDARAMRVLLDALYAYDVIDRIHDTNGFRYLLSAEARECLLPGTLFSLVGKFMHD","INVAWPAWRNLAEVVRHGARDTSGAESPNGIAQEDYESLVGGINFWAPPIVTTLSRKLRASGRSGDATASVLDVGCGTGLYSQLLLREFPRWTATGLDVERIATLANAQALRLGVEERFATRAGDFWRGGWGTGYDLVLFANIFHLQTPASAVRLMRHAAACLAPDGLVAVVDQIVDADREPKTPQDRFALLFAASMTNTGGGDAYTFQEYEEWFTAAGLQRIETLDTPMHRILLARRATEPSAVPEGQASENLYFQ"]]
     )
-    receptor_chain_ids: List[List[str]] = Field(default_factory=lambda: [["A"]])
-    receptor_msa_paths: List[List[Optional[str]]] = Field(default_factory=lambda: [[None]])
+    receptor_chain_ids: List[List[str]] = Field(default_factory=lambda: [["A", "B"]])
+    receptor_msa_paths: List[List[Optional[str]]] = Field(default_factory=lambda: [[None, None]])
     ligand_chain_id: List[str] = Field(default_factory=lambda: ["B"])
 
     # Output configuration
@@ -82,6 +82,7 @@ class Parameters:
     use_potentials: List[bool] = Field(default_factory=lambda: [False])
     no_kernels: List[bool] = Field(default_factory=lambda: [False])
     override: List[bool] = Field(default_factory=lambda: [True])
+    verbose: List[bool] = Field(default_factory=lambda: [False])
 
     # Metrics to extract and return
     # Available metrics: affinity_probability_binary, affinity_pred_value, plddt, ptm, iptm
@@ -96,6 +97,10 @@ class Parameters:
     custom_metric_functions: List[List[str]] = Field(default_factory=lambda: [[]])
     # Names for custom metrics (must match length of custom_metric_functions)
     custom_metric_names: List[List[str]] = Field(default_factory=lambda: [[]])
+
+    # Sample aggregation method for multiple diffusion samples
+    # Options: "best" (use model_0), "mean", "max", "min"
+    sample_aggregation_method: List[str] = Field(default_factory=lambda: ["best"])
 
 
 @add_tag("__component")
@@ -155,6 +160,7 @@ class Boltz2:
         self.use_potentials = params.use_potentials[0]
         self.no_kernels = params.no_kernels[0]
         self.override = params.override[0]
+        self.verbose = params.verbose[0]
 
         # Metrics configuration
         self.primary_metric = params.primary_metric[0]
@@ -164,12 +170,30 @@ class Boltz2:
         self.custom_metric_functions = params.custom_metric_functions[0]
         self.custom_metric_names = params.custom_metric_names[0]
 
+        # Sample aggregation method
+        self.sample_aggregation_method = params.sample_aggregation_method[0]
+
         # Validate custom metrics configuration
         if len(self.custom_metric_functions) != len(self.custom_metric_names):
             raise ValueError(
                 f"custom_metric_functions and custom_metric_names must have the same length. "
                 f"Got {len(self.custom_metric_functions)} functions and {len(self.custom_metric_names)} names"
             )
+
+        # Validate sample aggregation method
+        valid_methods = ["best", "mean", "max", "min"]
+        if self.sample_aggregation_method not in valid_methods:
+            raise ValueError(
+                f"sample_aggregation_method must be one of {valid_methods}. "
+                f"Got '{self.sample_aggregation_method}'"
+            )
+
+        # Auto-enable MSA server if no MSA paths are provided
+        if all(msa is None for msa in self.receptor_msa_paths):
+            if not self.use_msa_server:
+                if self.verbose:
+                    print("[INFO] No MSA paths provided, automatically enabling MSA server")
+                self.use_msa_server = True
 
     def _get_molecule_id(self, smiles: str) -> str:
         """Generate unique molecule ID from SMILES"""
@@ -178,6 +202,36 @@ class Boltz2:
             return MolToInchiKey(mol) if mol else f"invalid_{hash(smiles)}"
         except:
             return f"invalid_{hash(smiles)}"
+
+    def _aggregate_values(self, values: List[float], method: str) -> float:
+        """Aggregate multiple values based on specified method
+
+        Args:
+            values: List of values to aggregate
+            method: Aggregation method ("best", "mean", "max", "min")
+
+        Returns:
+            Aggregated value
+        """
+        if not values:
+            return np.nan
+
+        # Filter out NaN values
+        valid_values = [v for v in values if not np.isnan(v)]
+        if not valid_values:
+            return np.nan
+
+        if method == "best":
+            # "best" means first value (model_0, which should be highest ranked)
+            return float(valid_values[0])
+        elif method == "mean":
+            return float(np.mean(valid_values))
+        elif method == "max":
+            return float(np.max(valid_values))
+        elif method == "min":
+            return float(np.min(valid_values))
+        else:
+            return float(valid_values[0])  # Default to first value
 
     def _create_yaml_input(self, smiles: str, yaml_path: Path) -> bool:
         """Create Boltz2 YAML input file for a ligand-protein complex
@@ -325,6 +379,14 @@ class Boltz2:
                 cmd.append("--override")
 
             # Run Boltz2
+            if self.verbose:
+                print(f"\n[INFO] Running Boltz2 prediction:")
+                print(f"  Input directory: {input_dir}")
+                print(f"  Output directory: {temp_out_dir}")
+                print(f"  Diffusion samples: {self.diffusion_samples}")
+                print(f"  Recycling steps: {self.recycling_steps}")
+                print(f"  Use MSA server: {self.use_msa_server}")
+
             result = subprocess.run(
                 cmd,
                 capture_output=True,
@@ -332,9 +394,24 @@ class Boltz2:
                 check=True
             )
 
+            if self.verbose:
+                print(f"\n[INFO] Boltz2 stdout:")
+                print(result.stdout[:1000] if result.stdout else "(empty)")
+                if result.stderr:
+                    print(f"\n[INFO] Boltz2 stderr:")
+                    print(result.stderr[:1000])
+
             return True
 
-        except (subprocess.CalledProcessError, FileNotFoundError):
+        except subprocess.CalledProcessError as e:
+            if self.verbose:
+                print(f"\n[ERROR] Boltz2 command failed with exit code {e.returncode}")
+                print(f"[ERROR] stdout: {e.stdout[:500] if e.stdout else '(empty)'}")
+                print(f"[ERROR] stderr: {e.stderr[:500] if e.stderr else '(empty)'}")
+            return False
+        except FileNotFoundError as e:
+            if self.verbose:
+                print(f"\n[ERROR] Boltz2 command not found: {e}")
             return False
 
     def _extract_structure_metrics(self, prediction_dir: Path, mol_id: str) -> Optional[Dict[str, float]]:
@@ -348,31 +425,52 @@ class Boltz2:
             Dictionary with structure metrics (plddt, ptm, iptm), or None if not found
         """
         try:
-            # Boltz2 saves confidence metrics in predictions/{input_name}/confidence_{input_name}.json
-            confidence_file = prediction_dir / "predictions" / mol_id / f"confidence_{mol_id}.json"
+            pred_base_dir = prediction_dir / "boltz_results_inputs" / "predictions" / mol_id
 
-            if not confidence_file.exists():
-                return {}
+            # Check if we're dealing with multiple models
+            # Look for confidence_{mol_id}_model_0.json, _model_1.json, etc.
+            model_files = sorted(pred_base_dir.glob(f"confidence_{mol_id}_model_*.json"))
 
-            with open(confidence_file, 'r') as f:
-                confidence_data = json.load(f)
+            if not model_files:
+                # Fall back to single file without model suffix
+                confidence_file = pred_base_dir / f"confidence_{mol_id}.json"
+                if not confidence_file.exists():
+                    return {}
+                model_files = [confidence_file]
 
+            # Collect metrics from all models
+            all_plddt = []
+            all_ptm = []
+            all_iptm = []
+
+            for model_file in model_files:
+                with open(model_file, 'r') as f:
+                    confidence_data = json.load(f)
+
+                # Extract pLDDT
+                if "plddt" in confidence_data:
+                    plddt_values = confidence_data["plddt"]
+                    if isinstance(plddt_values, list):
+                        all_plddt.append(float(np.mean(plddt_values)))
+                    else:
+                        all_plddt.append(float(plddt_values))
+
+                # Extract pTM
+                if "ptm" in confidence_data:
+                    all_ptm.append(float(confidence_data["ptm"]))
+
+                # Extract ipTM
+                if "iptm" in confidence_data:
+                    all_iptm.append(float(confidence_data["iptm"]))
+
+            # Aggregate metrics based on chosen method
             metrics = {}
-            # Extract mean pLDDT (per-residue confidence)
-            if "plddt" in confidence_data:
-                plddt_values = confidence_data["plddt"]
-                if isinstance(plddt_values, list):
-                    metrics["plddt"] = float(np.mean(plddt_values))
-                else:
-                    metrics["plddt"] = float(plddt_values)
-
-            # Extract pTM (predicted TM-score)
-            if "ptm" in confidence_data:
-                metrics["ptm"] = float(confidence_data["ptm"])
-
-            # Extract ipTM (interface predicted TM-score)
-            if "iptm" in confidence_data:
-                metrics["iptm"] = float(confidence_data["iptm"])
+            if all_plddt:
+                metrics["plddt"] = self._aggregate_values(all_plddt, self.sample_aggregation_method)
+            if all_ptm:
+                metrics["ptm"] = self._aggregate_values(all_ptm, self.sample_aggregation_method)
+            if all_iptm:
+                metrics["iptm"] = self._aggregate_values(all_iptm, self.sample_aggregation_method)
 
             return metrics
 
@@ -390,19 +488,45 @@ class Boltz2:
             Dictionary with affinity_probability_binary and affinity_pred_value, or None if not found
         """
         try:
-            # Boltz2 saves predictions in predictions/{input_name}/affinity_{input_name}.json
-            affinity_file = prediction_dir / "predictions" / mol_id / f"affinity_{mol_id}.json"
+            pred_base_dir = prediction_dir / "boltz_results_inputs" / "predictions" / mol_id
 
-            if not affinity_file.exists():
-                return {}
+            # Check if we're dealing with multiple models
+            # Look for affinity_{mol_id}_model_0.json, _model_1.json, etc.
+            model_files = sorted(pred_base_dir.glob(f"affinity_{mol_id}_model_*.json"))
 
-            with open(affinity_file, 'r') as f:
-                affinity_data = json.load(f)
+            if not model_files:
+                # Fall back to single file without model suffix
+                affinity_file = pred_base_dir / f"affinity_{mol_id}.json"
+                if not affinity_file.exists():
+                    return {}
+                model_files = [affinity_file]
 
-            return {
-                "affinity_probability_binary": affinity_data.get("affinity_probability_binary", np.nan),
-                "affinity_pred_value": affinity_data.get("affinity_pred_value", np.nan)
-            }
+            # Collect metrics from all models
+            all_affinity_binary = []
+            all_affinity_value = []
+
+            for model_file in model_files:
+                with open(model_file, 'r') as f:
+                    affinity_data = json.load(f)
+
+                # Extract affinity metrics
+                if "affinity_probability_binary" in affinity_data:
+                    all_affinity_binary.append(affinity_data["affinity_probability_binary"])
+                if "affinity_pred_value" in affinity_data:
+                    all_affinity_value.append(affinity_data["affinity_pred_value"])
+
+            # Aggregate metrics based on chosen method
+            result = {}
+            if all_affinity_binary:
+                result["affinity_probability_binary"] = self._aggregate_values(
+                    all_affinity_binary, self.sample_aggregation_method
+                )
+            if all_affinity_value:
+                result["affinity_pred_value"] = self._aggregate_values(
+                    all_affinity_value, self.sample_aggregation_method
+                )
+
+            return result
 
         except Exception:
             return {}
@@ -554,7 +678,7 @@ class Boltz2:
             # Copy only successful predictions
             for mol_id, score in zip(mol_ids, binary_scores):
                 if not (np.isnan(score) or score is None):
-                    src_dir = temp_pred_dir / "predictions" / mol_id
+                    src_dir = temp_pred_dir / "boltz_results_inputs" / "predictions" / mol_id
                     dst_dir = output_pred_dir / mol_id
 
                     if src_dir.exists():
@@ -585,8 +709,33 @@ class Boltz2:
             if not any(preparation_results):
                 return self._get_empty_metrics(len(smilies))
 
+            # Debug: Check YAML files created (only in verbose mode)
+            if self.verbose:
+                yaml_files = list(input_dir.glob("*.yaml"))
+                print(f"\n[INFO] Created {len(yaml_files)} YAML input files")
+                if yaml_files:
+                    print(f"  Example: {yaml_files[0].name}")
+                    with open(yaml_files[0], 'r') as f:
+                        content = f.read()
+                        print(f"  Content preview:\n{content[:500]}")
+
             # Step 2: Run Boltz2 prediction
             success = self._run_boltz2_prediction(input_dir, temp_out_dir)
+
+            # Debug: Check what Boltz2 created (only in verbose mode)
+            if self.verbose:
+                print(f"\n[INFO] Boltz2 prediction completed: {success}")
+                if temp_out_dir.exists():
+                    predictions_dir = temp_out_dir / "boltz_results_inputs" / "predictions"
+                    if predictions_dir.exists():
+                        mol_ids = [self._get_molecule_id(s) for s in smilies]
+                        success_count = sum(1 for mol_id in mol_ids if (predictions_dir / mol_id).exists())
+                        print(f"[INFO] Successfully predicted {success_count}/{len(mol_ids)} molecules")
+                        for mol_id in mol_ids:
+                            mol_dir = predictions_dir / mol_id
+                            if mol_dir.exists():
+                                files = list(mol_dir.glob("*"))
+                                print(f"  {mol_id}: {len(files)} files")
 
             if not success:
                 return self._get_empty_metrics(len(smilies))
@@ -595,6 +744,8 @@ class Boltz2:
             metrics_dict = self._extract_metrics_aligned(
                 temp_out_dir, smilies, preparation_results
             )
+
+            # pdb.set_trace(header="extract")
 
             # Step 4: Copy successful predictions to permanent output
             # Use primary metric for determining success
