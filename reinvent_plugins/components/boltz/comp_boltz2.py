@@ -93,14 +93,29 @@ class Parameters:
 
     # Custom metric functions
     # List of Python module paths to custom metric functions
-    # Example: ["mypackage.metrics.custom_rmsd", "mypackage.metrics.contact_count"]
+    # Example:
+    # params.custom_metric_functions = [
+    #     "my_project.custom_boltz_metrics.protein_ligand_ipsae",
+    #     "reinvent_plugins.components.boltz.ipsae_metrics.ipsae_d0res"  # Also include protein-protein
+    # ]
+
+    # # Names for the custom metrics (must match in length!)
+    # params.custom_metric_names = [
+    #     "protein_ligand_ipsae",
+    #     "protein_protein_ipsae"
+    # ]
     custom_metric_functions: List[List[str]] = Field(default_factory=lambda: [[]])
-    # Names for custom metrics (must match length of custom_metric_functions)
     custom_metric_names: List[List[str]] = Field(default_factory=lambda: [[]])
 
     # Sample aggregation method for multiple diffusion samples
     # Options: "best" (use model_0), "mean", "max", "min"
     sample_aggregation_method: List[str] = Field(default_factory=lambda: ["best"])
+
+    # ipSAE metric parameters (for custom metrics)
+    # PAE cutoff for defining good interface residues (Ångströms)
+    pae_cutoff: List[float] = Field(default_factory=lambda: [10.0])
+    # Distance cutoff for defining interface contacts (Ångströms)
+    dist_cutoff: List[float] = Field(default_factory=lambda: [10.0])
 
 
 @add_tag("__component")
@@ -172,6 +187,16 @@ class Boltz2:
 
         # Sample aggregation method
         self.sample_aggregation_method = params.sample_aggregation_method[0]
+
+        # ipSAE metric parameters
+        self.pae_cutoff = params.pae_cutoff[0]
+        self.dist_cutoff = params.dist_cutoff[0]
+
+        # Set environment variables for ipSAE metrics (if custom metrics are used)
+        if self.custom_metric_functions:
+            import os
+            os.environ['BOLTZ_IPSAE_PAE_CUTOFF'] = str(self.pae_cutoff)
+            os.environ['BOLTZ_IPSAE_DIST_CUTOFF'] = str(self.dist_cutoff)
 
         # Validate custom metrics configuration
         if len(self.custom_metric_functions) != len(self.custom_metric_names):
@@ -414,6 +439,10 @@ class Boltz2:
                 print(f"\n[ERROR] Boltz2 command not found: {e}")
             return False
 
+    def _obtain_plddt_metrics(self, prediction_dir: Path, mol_id: str) -> Optional[List[float]]:
+        # TODO
+        pass
+
     def _extract_structure_metrics(self, prediction_dir: Path, mol_id: str) -> Optional[Dict[str, float]]:
         """Extract structure confidence metrics from Boltz2 output
 
@@ -447,13 +476,14 @@ class Boltz2:
                 with open(model_file, 'r') as f:
                     confidence_data = json.load(f)
 
-                # Extract pLDDT
-                if "plddt" in confidence_data:
-                    plddt_values = confidence_data["plddt"]
-                    if isinstance(plddt_values, list):
-                        all_plddt.append(float(np.mean(plddt_values)))
-                    else:
-                        all_plddt.append(float(plddt_values))
+                # TODO: return the mean plddt values here
+                # # Extract pLDDT
+                # if "plddt" in confidence_data:
+                #     plddt_values = confidence_data["plddt"]
+                #     if isinstance(plddt_values, list):
+                #         all_plddt.append(float(np.mean(plddt_values)))
+                #     else:
+                #         all_plddt.append(float(plddt_values))
 
                 # Extract pTM
                 if "ptm" in confidence_data:
@@ -490,30 +520,26 @@ class Boltz2:
         try:
             pred_base_dir = prediction_dir / "boltz_results_inputs" / "predictions" / mol_id
 
-            # Check if we're dealing with multiple models
-            # Look for affinity_{mol_id}_model_0.json, _model_1.json, etc.
-            model_files = sorted(pred_base_dir.glob(f"affinity_{mol_id}_model_*.json"))
+            # Check for affinity json file
+            affinity_file = pred_base_dir / f"affinity_{mol_id}.json"
+            if not affinity_file.exists():
+                return {}
 
-            if not model_files:
-                # Fall back to single file without model suffix
-                affinity_file = pred_base_dir / f"affinity_{mol_id}.json"
-                if not affinity_file.exists():
-                    return {}
-                model_files = [affinity_file]
-
-            # Collect metrics from all models
+            # Collect metrics
             all_affinity_binary = []
             all_affinity_value = []
 
-            for model_file in model_files:
-                with open(model_file, 'r') as f:
-                    affinity_data = json.load(f)
+            with open(affinity_file, 'r') as f:
+                affinity_data = json.load(f)
 
-                # Extract affinity metrics
-                if "affinity_probability_binary" in affinity_data:
-                    all_affinity_binary.append(affinity_data["affinity_probability_binary"])
-                if "affinity_pred_value" in affinity_data:
-                    all_affinity_value.append(affinity_data["affinity_pred_value"])
+            # Extract affinity metrics
+            all_affinity_binary.append(affinity_data["affinity_probability_binary"])
+            all_affinity_binary.append(affinity_data["affinity_probability_binary1"])
+            all_affinity_binary.append(affinity_data["affinity_probability_binary2"])
+
+            all_affinity_value.append(affinity_data["affinity_pred_value"])
+            all_affinity_value.append(affinity_data["affinity_pred_value1"])
+            all_affinity_value.append(affinity_data["affinity_pred_value2"])
 
             # Aggregate metrics based on chosen method
             result = {}
@@ -717,7 +743,7 @@ class Boltz2:
                     print(f"  Example: {yaml_files[0].name}")
                     with open(yaml_files[0], 'r') as f:
                         content = f.read()
-                        print(f"  Content preview:\n{content[:500]}")
+                        print(f"  Content preview:\n{content}")
 
             # Step 2: Run Boltz2 prediction
             success = self._run_boltz2_prediction(input_dir, temp_out_dir)
