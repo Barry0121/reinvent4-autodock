@@ -431,8 +431,9 @@ class Boltz2:
         except subprocess.CalledProcessError as e:
             if self.verbose:
                 print(f"\n[ERROR] Boltz2 command failed with exit code {e.returncode}")
-                print(f"[ERROR] stdout: {e.stdout[:500] if e.stdout else '(empty)'}")
-                print(f"[ERROR] stderr: {e.stderr[:500] if e.stderr else '(empty)'}")
+                print(f"[ERROR] stdout: {e.stdout[:2000] if e.stdout else '(empty)'}")
+                print(f"[ERROR] stderr: {e.stderr[:5000] if e.stderr else '(empty)'}")
+                print(f"\n[ERROR] Full stderr length: {len(e.stderr) if e.stderr else 0} characters")
             return False
         except FileNotFoundError as e:
             if self.verbose:
