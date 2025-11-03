@@ -93,17 +93,23 @@ class Parameters:
 
     # Custom metric functions
     # List of Python module paths to custom metric functions
-    # Example:
+    # Custom functions must have signature: (prediction_dir: Path, mol_id: str, ligand_chain_id: str) -> float
+    #
+    # Example - Using ipSAE metrics for protein-ligand interface quality:
     # params.custom_metric_functions = [
-    #     "my_project.custom_boltz_metrics.protein_ligand_ipsae",
-    #     "reinvent_plugins.components.boltz.ipsae_metrics.ipsae_d0res"  # Also include protein-protein
+    #     "reinvent_plugins.components.boltz.ipsae_metrics.ipsae_d0res",
+    #     "reinvent_plugins.components.boltz.ipsae_metrics.pdockq2"
     # ]
-
+    #
     # # Names for the custom metrics (must match in length!)
     # params.custom_metric_names = [
-    #     "protein_ligand_ipsae",
-    #     "protein_protein_ipsae"
+    #     "ipsae_d0res",
+    #     "pdockq2"
     # ]
+    #
+    # # Then set ipSAE as primary metric for optimization:
+    # params.primary_metric = "ipsae_d0res"
+    # params.additional_metrics = ["plddt", "iptm", "pdockq2"]
     custom_metric_functions: List[List[str]] = Field(default_factory=lambda: [[]])
     custom_metric_names: List[List[str]] = Field(default_factory=lambda: [[]])
 
@@ -583,14 +589,25 @@ class Boltz2:
         """Extract custom metrics using user-provided functions
 
         Args:
-            prediction_dir: Directory containing Boltz2 predictions
+            prediction_dir: Directory containing Boltz2 predictions (boltz_output root)
             mol_id: Molecule ID
-            smiles: Input SMILES string
+            smiles: Input SMILES string (not used by ipSAE metrics, kept for compatibility)
 
         Returns:
             Dictionary with custom metric values
+
+        Notes:
+            Custom metric functions should have signature:
+            (prediction_dir: Path, mol_id: str, ligand_chain_id: str) -> float
+
+            The prediction_dir passed to custom functions will be adjusted to point to
+            the "boltz_results_inputs/predictions" subdirectory where Boltz2 outputs are stored.
         """
         custom_metrics = {}
+
+        # Adjust prediction_dir to point to the Boltz2 predictions subdirectory
+        # Boltz2 outputs are in: prediction_dir/boltz_results_inputs/predictions/
+        boltz_predictions_dir = prediction_dir / "boltz_results_inputs" / "predictions"
 
         for func_path, metric_name in zip(self.custom_metric_functions, self.custom_metric_names):
             try:
@@ -602,8 +619,9 @@ class Boltz2:
                     continue
 
                 # Call the custom function
-                # Function signature: (prediction_dir: Path, mol_id: str, smiles: str) -> float
-                metric_value = custom_func(prediction_dir, mol_id, smiles)
+                # Function signature: (prediction_dir: Path, mol_id: str, ligand_chain_id: str) -> float
+                # Pass ligand_chain_id instead of smiles for ipSAE compatibility
+                metric_value = custom_func(boltz_predictions_dir, mol_id, self.ligand_chain_id)
 
                 # Validate and store
                 if isinstance(metric_value, (int, float)):
@@ -614,6 +632,8 @@ class Boltz2:
 
             except Exception as e:
                 print(f"Warning: Error computing custom metric '{metric_name}': {e}")
+                import traceback
+                traceback.print_exc()
                 custom_metrics[metric_name] = np.nan
 
         return custom_metrics
