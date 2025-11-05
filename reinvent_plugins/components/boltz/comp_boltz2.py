@@ -245,12 +245,12 @@ class Boltz2:
             Aggregated value
         """
         if not values:
-            return np.nan
+            return 0.0
 
         # Filter out NaN values
         valid_values = [v for v in values if not np.isnan(v)]
         if not valid_values:
-            return np.nan
+            return 0.0
 
         if method == "best":
             # "best" means first value (model_0, which should be highest ranked)
@@ -615,7 +615,8 @@ class Boltz2:
                 custom_func = self._load_custom_function(func_path)
 
                 if custom_func is None:
-                    custom_metrics[metric_name] = np.nan
+                    print(f"Warning: Custom metric '{metric_name}' doesn't exist.")
+                    custom_metrics[metric_name] = 0.0
                     continue
 
                 # Call the custom function
@@ -628,13 +629,13 @@ class Boltz2:
                     custom_metrics[metric_name] = float(metric_value)
                 else:
                     print(f"Warning: Custom metric '{metric_name}' returned non-numeric value: {type(metric_value)}")
-                    custom_metrics[metric_name] = np.nan
+                    custom_metrics[metric_name] = 0.0
 
             except Exception as e:
                 print(f"Warning: Error computing custom metric '{metric_name}': {e}")
                 import traceback
                 traceback.print_exc()
-                custom_metrics[metric_name] = np.nan
+                custom_metrics[metric_name] = 0.0
 
         return custom_metrics
 
@@ -689,7 +690,7 @@ class Boltz2:
             all_metric_names.extend(self.custom_metric_names)
 
         # Initialize all metrics with NaN
-        metrics_dict = {metric: [np.nan] * len(smilies) for metric in all_metric_names}
+        metrics_dict = {metric: [0.0] * len(smilies) for metric in all_metric_names}
 
         mol_ids = [self._get_molecule_id(s) for s in smilies]
 
@@ -796,7 +797,7 @@ class Boltz2:
 
             # Step 4: Copy successful predictions to permanent output
             # Use primary metric for determining success
-            primary_scores = metrics_dict.get(self.primary_metric, [np.nan] * len(smilies))
+            primary_scores = metrics_dict.get(self.primary_metric, [0.0] * len(smilies))
             self._copy_latest_predictions(
                 temp_out_dir,
                 out_dir / "boltz_pose",
@@ -825,7 +826,7 @@ class Boltz2:
         if self.custom_metric_names:
             all_metric_names.extend(self.custom_metric_names)
 
-        return {metric: [np.nan] * n_molecules for metric in all_metric_names}
+        return {metric: [0.0] * n_molecules for metric in all_metric_names}
 
     def __call__(self, smilies: List[str]) -> ComponentResults:
         """Score a list of SMILES using Boltz2 prediction
@@ -856,7 +857,7 @@ class Boltz2:
             metrics_dict = self._score_molecules(smilies, out_dir, temp_dir)
 
         # Get primary metric scores
-        primary_scores = metrics_dict.get(self.primary_metric, [np.nan] * len(smilies))
+        primary_scores = metrics_dict.get(self.primary_metric, [0.0] * len(smilies))
 
         # Build scores list - primary metric is always first
         scores = [np.array(primary_scores, dtype=float)]
