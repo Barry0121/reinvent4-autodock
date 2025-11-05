@@ -425,12 +425,12 @@ class Boltz2:
                 check=True
             )
 
-            if self.verbose:
-                print(f"\n[INFO] Boltz2 stdout:")
-                print(result.stdout[:5000] if result.stdout else "(empty)")
-                if result.stderr:
-                    print(f"\n[INFO] Boltz2 stderr:")
-                    print(result.stderr[:5000])
+            # if self.verbose:
+            #     print(f"\n[INFO] Boltz2 stdout:")
+            #     print(result.stdout[:5000] if result.stdout else "(empty)")
+            #     if result.stderr:
+            #         print(f"\n[INFO] Boltz2 stderr:")
+            #         print(result.stderr[:5000])
 
             return True
 
@@ -607,7 +607,7 @@ class Boltz2:
 
         # Adjust prediction_dir to point to the Boltz2 predictions subdirectory
         # Boltz2 outputs are in: prediction_dir/boltz_results_inputs/predictions/
-        boltz_predictions_dir = prediction_dir / "boltz_results_inputs" / "predictions"
+        boltz_predictions_dir = prediction_dir / "boltz_results_inputs" / "predictions" / mol_id
 
         for func_path, metric_name in zip(self.custom_metric_functions, self.custom_metric_names):
             try:
@@ -629,13 +629,9 @@ class Boltz2:
                     try:
                         mv = float(metric_value)
                         if not np.isfinite(mv):
-                            if self.verbose:
-                                print(f"[DEBUG] Custom metric '{metric_name}' returned non-finite value {metric_value}; coercing to 0.0")
                             mv = 0.0
                         custom_metrics[metric_name] = mv
                     except Exception:
-                        if self.verbose:
-                            print(f"[DEBUG] Failed to cast custom metric '{metric_name}' value {metric_value}; setting to 0.0")
                         custom_metrics[metric_name] = 0.0
                 else:
                     if self.verbose:

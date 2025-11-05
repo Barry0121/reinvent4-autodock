@@ -81,22 +81,20 @@ from rdkit import Chem
 # Suppress numpy warnings for cleaner output
 np.seterr(divide='ignore', invalid='ignore')
 
-# Helper to sanitize numeric outputs: convert None/NaN/Inf to 0.0
-def sanitize_metric_value(v: Optional[float]) -> float:
-    """Return a safe float: convert None, NaN or infinite to 0.0, else return float(v).
-
-    We explicitly convert to 0.0 to ensure custom metrics cannot increase a score
-    by returning NaN/Inf. Returning 0.0 reduces the score (safe fallback).
-    """
+# Helper to sanitize numeric outputs: convert None/NaN/Inf to np.nan
+def sanitize_metric_value(v: Optional[float], verbose: bool = False) -> float:
+    """Return a safe float: log problematic values and return np.nan instead of 0.0"""
     try:
         if v is None:
-            return 0.0
-        val = float(v)
-        if not np.isfinite(val):
-            return 0.0
-        return val
-    except Exception:
-        return 0.0
+            return np.nan
+        fv = float(v)
+        if np.isnan(fv):
+            return np.nan
+        if np.isinf(fv):
+            return np.nan
+        return fv
+    except Exception as e:
+        return np.nan
 
 # Default cutoffs (can be overridden via environment variables)
 DEFAULT_PAE_CUTOFF = 10.0
@@ -273,6 +271,7 @@ def _calculate_protein_ligand_metrics(
 
     if n0_interface == 0:
         # No good interface
+        warnings.warn(f"No interface residues detected.")
         return {
             'ipsae_d0res': 0.0,
             'ipsae_d0chn': 0.0,
@@ -829,11 +828,21 @@ def _calculate_ipsae_metrics(
         ligand_chain: Ligand chain IDs
         pae_cutoff: PAE cutoff in Ångströms (None = use from env/defaults)
         dist_cutoff: Distance cutoff in Ångströms (None = use from env/defaults)
+        verbose: Whether to print debug information
 
     Returns:
         Dictionary with all computed metrics, or empty dict on failure
     """
     try:
+        structure_path = prediction_dir / f"{mol_id}_model_0.cif"
+        pae_path = prediction_dir / f"pae_{mol_id}_model_0.npz"
+        confidence_file = prediction_dir / f"confidence_{mol_id}_model_0.json"
+
+        if not structure_path.exists() or not pae_path.exists():
+            if verbose:
+                print("Required files not found")
+            return {}
+
         # Get cutoffs from environment or defaults if not provided
         if pae_cutoff is None or dist_cutoff is None:
             env_pae, env_dist = get_cutoffs()
@@ -841,28 +850,19 @@ def _calculate_ipsae_metrics(
                 pae_cutoff = env_pae
             if dist_cutoff is None:
                 dist_cutoff = env_dist
-        # Construct paths
-        # Note: prediction_dir from Boltz2 component is already at boltz_pose level
-        # Files are in prediction_dir/{mol_id}/ directly (no "predictions" subdirectory)
-        pred_subdir = prediction_dir / mol_id
-        structure_file = pred_subdir / f"{mol_id}_model_0.cif"
-        pae_file = pred_subdir / f"pae_{mol_id}_model_0.npz"
-        confidence_file = pred_subdir / f"confidence_{mol_id}_model_0.json"
 
-        # Check required files exist
-        if not structure_file.exists() or not pae_file.exists():
-            return {}
 
         # Load structure
         if ligand_chain_id:
             ca_residues, cb_residues, ligand_heavy_atoms, chains = load_structure_from_cif(
-                structure_file,
+                structure_path,
                 ligand_chain_id=ligand_chain_id
             )
         else:
-            ca_residues, cb_residues, _, chains = load_structure_from_cif(structure_file)
+            ca_residues, cb_residues, _, chains = load_structure_from_cif(structure_path)
 
         if len(ca_residues) == 0 or len(cb_residues) == 0:
+            warnings.warn("No CA or CB residues detected. ")
             return {}
 
         numres = len(ca_residues)
@@ -870,10 +870,11 @@ def _calculate_ipsae_metrics(
 
         # If only one chain (ligand only), cannot compute interface metrics
         if len(unique_chains) < 2:
+            warnings.warn("No protein chain is detected.")
             return {}
 
         # Load PAE matrix
-        pae_matrix = load_pae_matrix(pae_file)
+        pae_matrix = load_pae_matrix(pae_path)
         if pae_matrix is None:
             return {}
 
@@ -914,6 +915,7 @@ def _calculate_ipsae_metrics(
 
             # Only one protein chain - compute protein-ligand metrics if applicable
             if len(ligand_heavy_atoms) == 0:
+                warnings.warn("Only protein chain is detected when we want to get interface scores between protein-ligand complex.")
                 return {}
 
             # Calculate protein-ligand distances
@@ -1006,19 +1008,12 @@ def _calculate_ipsae_metrics(
 
     except Exception as e:
         import traceback
-        print(f"ERROR: {e}")
-        traceback.print_exc()
+        if verbose:
+            print(f"Error in _calculate_ipsae_metrics: {str(e)}")
+            traceback.print_exc()
         warnings.warn(f"Error calculating ipSAE metrics for {mol_id}: {e}\n{traceback.format_exc()}")
-        # Return zeroed metrics so downstream code receives numeric values
-        return {
-            'ipsae_d0res': 0.0,
-            'ipsae_d0chn': 0.0,
-            'ipsae_d0dom': 0.0,
-            'pdockq': 0.0,
-            'pdockq2': 0.0,
-            'lis_score': 0.0,
-            'iptm_from_pae': 0.0
-        }
+        # Return empty dict to trigger np.nan values in metric functions
+        return {}
 
 
 # =============================================================================
@@ -1042,8 +1037,11 @@ def ipsae_d0res(prediction_dir: Path, mol_id: str, ligand_chain_id: str, verbose
     Returns:
         ipSAE score (0-1, higher = better interface quality)
     """
-    metrics = _calculate_ipsae_metrics(prediction_dir, mol_id, ligand_chain_id, verbose)
-    return sanitize_metric_value(metrics.get('ipsae_d0res', 0.0))
+    metrics = _calculate_ipsae_metrics(prediction_dir, mol_id, ligand_chain_id, verbose=verbose)
+    if not metrics:
+        return np.nan
+    score = metrics.get('ipsae_d0res', np.nan)
+    return sanitize_metric_value(score, verbose)
 
 
 def ipsae_d0chn(prediction_dir: Path, mol_id: str, ligand_chain_id: str, verbose: bool = False) -> float:
@@ -1060,8 +1058,11 @@ def ipsae_d0chn(prediction_dir: Path, mol_id: str, ligand_chain_id: str, verbose
     Returns:
         ipSAE score (0-1, higher = better)
     """
-    metrics = _calculate_ipsae_metrics(prediction_dir, mol_id, ligand_chain_id, verbose)
-    return sanitize_metric_value(metrics.get('ipsae_d0chn', 0.0))
+    metrics = _calculate_ipsae_metrics(prediction_dir, mol_id, ligand_chain_id, verbose=verbose)
+    if not metrics:
+        return np.nan
+    score = metrics.get('ipsae_d0chn', np.nan)
+    return sanitize_metric_value(score, verbose)
 
 
 def ipsae_d0dom(prediction_dir: Path, mol_id: str, ligand_chain_id: str, verbose: bool = False) -> float:
@@ -1078,8 +1079,11 @@ def ipsae_d0dom(prediction_dir: Path, mol_id: str, ligand_chain_id: str, verbose
     Returns:
         ipSAE score (0-1, higher = better)
     """
-    metrics = _calculate_ipsae_metrics(prediction_dir, mol_id, ligand_chain_id, verbose)
-    return sanitize_metric_value(metrics.get('ipsae_d0dom', 0.0))
+    metrics = _calculate_ipsae_metrics(prediction_dir, mol_id, ligand_chain_id, verbose=verbose)
+    if not metrics:
+        return np.nan
+    score = metrics.get('ipsae_d0dom', np.nan)
+    return sanitize_metric_value(score, verbose)
 
 
 def pdockq(prediction_dir: Path, mol_id: str, ligand_chain_id: str, verbose: bool = False) -> float:
