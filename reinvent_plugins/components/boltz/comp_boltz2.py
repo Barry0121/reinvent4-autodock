@@ -222,8 +222,8 @@ class Boltz2:
         # Auto-enable MSA server if no MSA paths are provided
         if all(msa is None for msa in self.receptor_msa_paths):
             if not self.use_msa_server:
-                if self.verbose:
-                    print("[INFO] No MSA paths provided, automatically enabling MSA server")
+                # if self.verbose:
+                #     print("[INFO] No MSA paths provided, automatically enabling MSA server")
                 self.use_msa_server = True
 
     def _get_molecule_id(self, smiles: str) -> str:
@@ -410,13 +410,13 @@ class Boltz2:
                 cmd.append("--override")
 
             # Run Boltz2
-            if self.verbose:
-                print(f"\n[INFO] Running Boltz2 prediction:")
-                print(f"  Input directory: {input_dir}")
-                print(f"  Output directory: {temp_out_dir}")
-                print(f"  Diffusion samples: {self.diffusion_samples}")
-                print(f"  Recycling steps: {self.recycling_steps}")
-                print(f"  Use MSA server: {self.use_msa_server}")
+            # if self.verbose:
+            #     print(f"\n[INFO] Running Boltz2 prediction:")
+            #     print(f"  Input directory: {input_dir}")
+            #     print(f"  Output directory: {temp_out_dir}")
+            #     print(f"  Diffusion samples: {self.diffusion_samples}")
+            #     print(f"  Recycling steps: {self.recycling_steps}")
+            #     print(f"  Use MSA server: {self.use_msa_server}")
 
             result = subprocess.run(
                 cmd,
@@ -769,32 +769,32 @@ class Boltz2:
                 return self._get_empty_metrics(len(smilies))
 
             # Debug: Check YAML files created (only in verbose mode)
-            if self.verbose:
-                yaml_files = list(input_dir.glob("*.yaml"))
-                print(f"\n[INFO] Created {len(yaml_files)} YAML input files")
-                if yaml_files:
-                    print(f"  Example: {yaml_files[0].name}")
-                    with open(yaml_files[0], 'r') as f:
-                        content = f.read()
-                        print(f"  Content preview:\n{content}")
+            # if self.verbose:
+            #     yaml_files = list(input_dir.glob("*.yaml"))
+            #     print(f"\n[INFO] Created {len(yaml_files)} YAML input files")
+            #     if yaml_files:
+            #         print(f"  Example: {yaml_files[0].name}")
+            #         with open(yaml_files[0], 'r') as f:
+            #             content = f.read()
+            #             print(f"  Content preview:\n{content}")
 
             # Step 2: Run Boltz2 prediction
             success = self._run_boltz2_prediction(input_dir, temp_out_dir)
 
             # Debug: Check what Boltz2 created (only in verbose mode)
-            if self.verbose:
-                print(f"\n[INFO] Boltz2 prediction completed: {success}")
-                if temp_out_dir.exists():
-                    predictions_dir = temp_out_dir / "boltz_results_inputs" / "predictions"
-                    if predictions_dir.exists():
-                        mol_ids = [self._get_molecule_id(s) for s in smilies]
-                        success_count = sum(1 for mol_id in mol_ids if (predictions_dir / mol_id).exists())
-                        print(f"[INFO] Successfully predicted {success_count}/{len(mol_ids)} molecules")
-                        for mol_id in mol_ids:
-                            mol_dir = predictions_dir / mol_id
-                            if mol_dir.exists():
-                                files = list(mol_dir.glob("*"))
-                                print(f"  {mol_id}: {len(files)} files")
+            # if self.verbose:
+            #     print(f"\n[INFO] Boltz2 prediction completed: {success}")
+            #     if temp_out_dir.exists():
+            #         predictions_dir = temp_out_dir / "boltz_results_inputs" / "predictions"
+            #         if predictions_dir.exists():
+            #             mol_ids = [self._get_molecule_id(s) for s in smilies]
+            #             success_count = sum(1 for mol_id in mol_ids if (predictions_dir / mol_id).exists())
+            #             print(f"[INFO] Successfully predicted {success_count}/{len(mol_ids)} molecules")
+            #             for mol_id in mol_ids:
+            #                 mol_dir = predictions_dir / mol_id
+            #                 if mol_dir.exists():
+            #                     files = list(mol_dir.glob("*"))
+            #                     print(f"  {mol_id}: {len(files)} files")
 
             if not success:
                 return self._get_empty_metrics(len(smilies))
