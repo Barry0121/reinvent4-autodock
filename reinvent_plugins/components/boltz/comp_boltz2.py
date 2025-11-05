@@ -427,18 +427,18 @@ class Boltz2:
 
             if self.verbose:
                 print(f"\n[INFO] Boltz2 stdout:")
-                print(result.stdout[:1000] if result.stdout else "(empty)")
+                print(result.stdout[:5000] if result.stdout else "(empty)")
                 if result.stderr:
                     print(f"\n[INFO] Boltz2 stderr:")
-                    print(result.stderr[:1000])
+                    print(result.stderr[:5000])
 
             return True
 
         except subprocess.CalledProcessError as e:
             if self.verbose:
                 print(f"\n[ERROR] Boltz2 command failed with exit code {e.returncode}")
-                print(f"[ERROR] stdout: {e.stdout[:2000] if e.stdout else '(empty)'}")
-                print(f"[ERROR] stderr: {e.stderr[:5000] if e.stderr else '(empty)'}")
+                print(f"[ERROR] stdout: {e.stdout[:8000] if e.stdout else '(empty)'}")
+                print(f"[ERROR] stderr: {e.stderr[:8000] if e.stderr else '(empty)'}")
                 print(f"\n[ERROR] Full stderr length: {len(e.stderr) if e.stderr else 0} characters")
             return False
         except FileNotFoundError as e:
