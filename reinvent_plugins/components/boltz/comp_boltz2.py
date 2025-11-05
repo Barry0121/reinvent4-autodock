@@ -624,11 +624,22 @@ class Boltz2:
                 # Pass ligand_chain_id instead of smiles for ipSAE compatibility
                 metric_value = custom_func(boltz_predictions_dir, mol_id, self.ligand_chain_id, verbose=self.verbose)
 
-                # Validate and store
+                # Validate, sanitize and store numeric result (NaN/Inf/None -> 0.0)
                 if isinstance(metric_value, (int, float)):
-                    custom_metrics[metric_name] = float(metric_value)
+                    try:
+                        mv = float(metric_value)
+                        if not np.isfinite(mv):
+                            if self.verbose:
+                                print(f"[DEBUG] Custom metric '{metric_name}' returned non-finite value {metric_value}; coercing to 0.0")
+                            mv = 0.0
+                        custom_metrics[metric_name] = mv
+                    except Exception:
+                        if self.verbose:
+                            print(f"[DEBUG] Failed to cast custom metric '{metric_name}' value {metric_value}; setting to 0.0")
+                        custom_metrics[metric_name] = 0.0
                 else:
-                    print(f"Warning: Custom metric '{metric_name}' returned non-numeric value: {type(metric_value)}")
+                    if self.verbose:
+                        print(f"Warning: Custom metric '{metric_name}' returned non-numeric value: {type(metric_value)}; setting to 0.0")
                     custom_metrics[metric_name] = 0.0
 
             except Exception as e:

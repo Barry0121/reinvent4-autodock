@@ -81,6 +81,23 @@ from rdkit import Chem
 # Suppress numpy warnings for cleaner output
 np.seterr(divide='ignore', invalid='ignore')
 
+# Helper to sanitize numeric outputs: convert None/NaN/Inf to 0.0
+def sanitize_metric_value(v: Optional[float]) -> float:
+    """Return a safe float: convert None, NaN or infinite to 0.0, else return float(v).
+
+    We explicitly convert to 0.0 to ensure custom metrics cannot increase a score
+    by returning NaN/Inf. Returning 0.0 reduces the score (safe fallback).
+    """
+    try:
+        if v is None:
+            return 0.0
+        val = float(v)
+        if not np.isfinite(val):
+            return 0.0
+        return val
+    except Exception:
+        return 0.0
+
 # Default cutoffs (can be overridden via environment variables)
 DEFAULT_PAE_CUTOFF = 10.0
 DEFAULT_DIST_CUTOFF = 10.0
@@ -739,10 +756,28 @@ def load_pae_matrix(pae_path: Path) -> Optional[np.ndarray]:
         NxN PAE matrix in Ångströms, or None if file not found
     """
     try:
-        pae_data = np.load(pae_path)
-        return pae_data['pae']
-    except (FileNotFoundError, KeyError):
+        pae_data = np.load(pae_path, allow_pickle=False)
+    except Exception:
         return None
+
+    # Preferred key
+    try:
+        if 'pae' in pae_data.files:
+            arr = np.array(pae_data['pae'], dtype=float)
+            return arr
+    except Exception:
+        pass
+
+    # Fallback: try any 2D square array in the NPZ
+    for key in pae_data.files:
+        try:
+            arr = np.array(pae_data[key], dtype=float)
+            if arr.ndim == 2 and arr.shape[0] == arr.shape[1]:
+                return arr
+        except Exception:
+            continue
+
+    return None
 
 
 def load_plddt_from_confidence(confidence_path: Path, ca_atom_indices: np.ndarray) -> Optional[np.ndarray]:
@@ -974,7 +1009,16 @@ def _calculate_ipsae_metrics(
         print(f"ERROR: {e}")
         traceback.print_exc()
         warnings.warn(f"Error calculating ipSAE metrics for {mol_id}: {e}\n{traceback.format_exc()}")
-        return {}
+        # Return zeroed metrics so downstream code receives numeric values
+        return {
+            'ipsae_d0res': 0.0,
+            'ipsae_d0chn': 0.0,
+            'ipsae_d0dom': 0.0,
+            'pdockq': 0.0,
+            'pdockq2': 0.0,
+            'lis_score': 0.0,
+            'iptm_from_pae': 0.0
+        }
 
 
 # =============================================================================
@@ -999,7 +1043,7 @@ def ipsae_d0res(prediction_dir: Path, mol_id: str, ligand_chain_id: str, verbose
         ipSAE score (0-1, higher = better interface quality)
     """
     metrics = _calculate_ipsae_metrics(prediction_dir, mol_id, ligand_chain_id, verbose)
-    return metrics.get('ipsae_d0res', 0.0)
+    return sanitize_metric_value(metrics.get('ipsae_d0res', 0.0))
 
 
 def ipsae_d0chn(prediction_dir: Path, mol_id: str, ligand_chain_id: str, verbose: bool = False) -> float:
@@ -1017,7 +1061,7 @@ def ipsae_d0chn(prediction_dir: Path, mol_id: str, ligand_chain_id: str, verbose
         ipSAE score (0-1, higher = better)
     """
     metrics = _calculate_ipsae_metrics(prediction_dir, mol_id, ligand_chain_id, verbose)
-    return metrics.get('ipsae_d0chn', 0.0)
+    return sanitize_metric_value(metrics.get('ipsae_d0chn', 0.0))
 
 
 def ipsae_d0dom(prediction_dir: Path, mol_id: str, ligand_chain_id: str, verbose: bool = False) -> float:
@@ -1035,7 +1079,7 @@ def ipsae_d0dom(prediction_dir: Path, mol_id: str, ligand_chain_id: str, verbose
         ipSAE score (0-1, higher = better)
     """
     metrics = _calculate_ipsae_metrics(prediction_dir, mol_id, ligand_chain_id, verbose)
-    return metrics.get('ipsae_d0dom', 0.0)
+    return sanitize_metric_value(metrics.get('ipsae_d0dom', 0.0))
 
 
 def pdockq(prediction_dir: Path, mol_id: str, ligand_chain_id: str, verbose: bool = False) -> float:
@@ -1057,7 +1101,7 @@ def pdockq(prediction_dir: Path, mol_id: str, ligand_chain_id: str, verbose: boo
         pDockQ score (0-1, higher = better)
     """
     metrics = _calculate_ipsae_metrics(prediction_dir, mol_id, ligand_chain_id, verbose)
-    return metrics.get('pdockq', 0.0)
+    return sanitize_metric_value(metrics.get('pdockq', 0.0))
 
 
 def pdockq2(prediction_dir: Path, mol_id: str, ligand_chain_id: str, verbose: bool = False) -> float:
@@ -1079,7 +1123,7 @@ def pdockq2(prediction_dir: Path, mol_id: str, ligand_chain_id: str, verbose: bo
         pDockQ2 score (0-1, higher = better)
     """
     metrics = _calculate_ipsae_metrics(prediction_dir, mol_id, ligand_chain_id, verbose)
-    return metrics.get('pdockq2', 0.0)
+    return sanitize_metric_value(metrics.get('pdockq2', 0.0))
 
 
 def lis_score(prediction_dir: Path, mol_id: str, ligand_chain_id: str, verbose: bool = False) -> float:
@@ -1101,7 +1145,7 @@ def lis_score(prediction_dir: Path, mol_id: str, ligand_chain_id: str, verbose: 
         LIS score (0-1, higher = better)
     """
     metrics = _calculate_ipsae_metrics(prediction_dir, mol_id, ligand_chain_id, verbose)
-    return metrics.get('lis_score', 0.0)
+    return sanitize_metric_value(metrics.get('lis_score', 0.0))
 
 
 def iptm_from_pae(prediction_dir: Path, mol_id: str, ligand_chain_id: str, verbose: bool = False) -> float:
@@ -1120,7 +1164,7 @@ def iptm_from_pae(prediction_dir: Path, mol_id: str, ligand_chain_id: str, verbo
         ipTM score (0-1, higher = better)
     """
     metrics = _calculate_ipsae_metrics(prediction_dir, mol_id, ligand_chain_id, verbose)
-    return metrics.get('iptm_from_pae', 0.0)
+    return sanitize_metric_value(metrics.get('iptm_from_pae', 0.0))
 
 def get_all_score(prediction_dir: Path, mol_id: str, ligand_chain_id: str, verbose: bool = False) -> Optional[Dict]:
     """Calculate ipSAE with per-residue d0 normalization (RECOMMENDED)
@@ -1140,4 +1184,8 @@ def get_all_score(prediction_dir: Path, mol_id: str, ligand_chain_id: str, verbo
         ipSAE score (0-1, higher = better interface quality)
     """
     metrics = _calculate_ipsae_metrics(prediction_dir, mol_id, ligand_chain_id, verbose)
-    return metrics
+    if not metrics:
+        return None
+    # Sanitize all numeric values
+    sanitized = {k: sanitize_metric_value(v) for k, v in metrics.items()}
+    return sanitized
