@@ -621,7 +621,7 @@ class Boltz2:
                 # Call the custom function
                 # Function signature: (prediction_dir: Path, mol_id: str, ligand_chain_id: str) -> float
                 # Pass ligand_chain_id instead of smiles for ipSAE compatibility
-                metric_value = custom_func(boltz_predictions_dir, mol_id, self.ligand_chain_id)
+                metric_value = custom_func(boltz_predictions_dir, mol_id, self.ligand_chain_id, verbose=self.verbose)
 
                 # Validate and store
                 if isinstance(metric_value, (int, float)):

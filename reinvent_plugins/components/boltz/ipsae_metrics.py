@@ -780,7 +780,8 @@ def _calculate_ipsae_metrics(
         mol_id: str,
         ligand_chain_id: Optional[str] = None,  # NEW: specify ligand chain
         pae_cutoff: Optional[float] = None,
-        dist_cutoff: Optional[float] = None
+        dist_cutoff: Optional[float] = None,
+        verbose: Optional[bool] = False,
     ) -> Dict[str, float]:
     """Core ipSAE calculation for all variants
 
@@ -873,7 +874,8 @@ def _calculate_ipsae_metrics(
         has_multiple_protein_chains = len(protein_chains) >= 2
 
         if has_ligand and (ligand_coordinate is not None):
-            print(f"Calculating interface scores between a pair or more protein chains with a ligand chain.")
+            if verbose:
+                print(f"Calculating interface scores between a pair or more protein chains with a ligand chain.")
 
             # Only one protein chain - compute protein-ligand metrics if applicable
             if len(ligand_heavy_atoms) == 0:
@@ -890,10 +892,12 @@ def _calculate_ipsae_metrics(
             )
 
         elif has_multiple_protein_chains:
-            print(f"Calculating interface scores for a pair or more protein chains.")
+            if verbose:
+                print(f"Calculating interface scores for a pair or more protein chains.")
             if len(protein_chains) == 2:
                 # Simple case: one interface
-                print(f"Calculating interface scores between protein chains {protein_chains[0]} and {protein_chains[1]}.")
+                if verbose:
+                    print(f"Calculating interface scores between protein chains {protein_chains[0]} and {protein_chains[1]}.")
 
                 chain1, chain2 = protein_chains[0], protein_chains[1]
                 return _calculate_protein_protein_metrics(
@@ -904,7 +908,8 @@ def _calculate_ipsae_metrics(
 
             else:
                 # Multiple chains (3+): calculate all pairwise interfaces
-                print(f"Calculating interface scores for {len(protein_chains)} protein chains (all pairwise combinations).")
+                if verbose:
+                    print(f"Calculating interface scores for {len(protein_chains)} protein chains (all pairwise combinations).")
 
                 all_metrics = []
                 interface_pairs = []
@@ -927,7 +932,8 @@ def _calculate_ipsae_metrics(
 
                 if not all_metrics:
                     # No valid interfaces found
-                    print(f"Warning: No valid protein-protein interfaces found among {len(protein_chains)} chains.")
+                    if verbose:
+                        print(f"Warning: No valid protein-protein interfaces found among {len(protein_chains)} chains.")
                     return {
                         'ipsae_d0res': 0.0,
                         'ipsae_d0chn': 0.0,
@@ -939,7 +945,8 @@ def _calculate_ipsae_metrics(
                     }
 
                 # Aggregate across all interfaces using MAX (best interface)
-                print(f"Found {len(all_metrics)} valid interfaces. Aggregating using MAX.")
+                if verbose:
+                    print(f"Found {len(all_metrics)} valid interfaces. Aggregating using MAX.")
 
                 best_metrics = {
                     'ipsae_d0res': max(m['ipsae_d0res'] for m in all_metrics),
@@ -974,7 +981,7 @@ def _calculate_ipsae_metrics(
 # Public Metric Functions
 # =============================================================================
 
-def ipsae_d0res(prediction_dir: Path, mol_id: str, ligand_chain_id: str) -> float:
+def ipsae_d0res(prediction_dir: Path, mol_id: str, ligand_chain_id: str, verbose: bool = False) -> float:
     """Calculate ipSAE with per-residue d0 normalization (RECOMMENDED)
 
     This is the primary ipSAE metric recommended by Dunbrack 2025.
@@ -991,11 +998,11 @@ def ipsae_d0res(prediction_dir: Path, mol_id: str, ligand_chain_id: str) -> floa
     Returns:
         ipSAE score (0-1, higher = better interface quality)
     """
-    metrics = _calculate_ipsae_metrics(prediction_dir, mol_id, ligand_chain_id)
-    return metrics.get('ipsae_d0res', np.nan)
+    metrics = _calculate_ipsae_metrics(prediction_dir, mol_id, ligand_chain_id, verbose)
+    return metrics.get('ipsae_d0res', 0.0)
 
 
-def ipsae_d0chn(prediction_dir: Path, mol_id: str, ligand_chain_id: str) -> float:
+def ipsae_d0chn(prediction_dir: Path, mol_id: str, ligand_chain_id: str, verbose: bool = False) -> float:
     """Calculate ipSAE with chain-pair d0 normalization
 
     Uses d0 based on total chain pair length (len(chain1) + len(chain2)).
@@ -1009,11 +1016,11 @@ def ipsae_d0chn(prediction_dir: Path, mol_id: str, ligand_chain_id: str) -> floa
     Returns:
         ipSAE score (0-1, higher = better)
     """
-    metrics = _calculate_ipsae_metrics(prediction_dir, mol_id, ligand_chain_id)
-    return metrics.get('ipsae_d0chn', np.nan)
+    metrics = _calculate_ipsae_metrics(prediction_dir, mol_id, ligand_chain_id, verbose)
+    return metrics.get('ipsae_d0chn', 0.0)
 
 
-def ipsae_d0dom(prediction_dir: Path, mol_id: str, ligand_chain_id: str) -> float:
+def ipsae_d0dom(prediction_dir: Path, mol_id: str, ligand_chain_id: str, verbose: bool = False) -> float:
     """Calculate ipSAE with domain-based d0 normalization
 
     Uses d0 based on the number of residues in the interface domain
@@ -1027,11 +1034,11 @@ def ipsae_d0dom(prediction_dir: Path, mol_id: str, ligand_chain_id: str) -> floa
     Returns:
         ipSAE score (0-1, higher = better)
     """
-    metrics = _calculate_ipsae_metrics(prediction_dir, mol_id, ligand_chain_id)
-    return metrics.get('ipsae_d0dom', np.nan)
+    metrics = _calculate_ipsae_metrics(prediction_dir, mol_id, ligand_chain_id, verbose)
+    return metrics.get('ipsae_d0dom', 0.0)
 
 
-def pdockq(prediction_dir: Path, mol_id: str, ligand_chain_id: str) -> float:
+def pdockq(prediction_dir: Path, mol_id: str, ligand_chain_id: str, verbose: bool = False) -> float:
     """Calculate pDockQ score (Bryant et al. 2022)
 
     Predicts DockQ score from pLDDT and number of interface contacts.
@@ -1049,11 +1056,11 @@ def pdockq(prediction_dir: Path, mol_id: str, ligand_chain_id: str) -> float:
     Returns:
         pDockQ score (0-1, higher = better)
     """
-    metrics = _calculate_ipsae_metrics(prediction_dir, mol_id, ligand_chain_id)
-    return metrics.get('pdockq', np.nan)
+    metrics = _calculate_ipsae_metrics(prediction_dir, mol_id, ligand_chain_id, verbose)
+    return metrics.get('pdockq', 0.0)
 
 
-def pdockq2(prediction_dir: Path, mol_id: str, ligand_chain_id: str) -> float:
+def pdockq2(prediction_dir: Path, mol_id: str, ligand_chain_id: str, verbose: bool = False) -> float:
     """Calculate pDockQ2 score (Zhu et al. 2023)
 
     Improved version incorporating PAE information alongside pLDDT.
@@ -1071,11 +1078,11 @@ def pdockq2(prediction_dir: Path, mol_id: str, ligand_chain_id: str) -> float:
     Returns:
         pDockQ2 score (0-1, higher = better)
     """
-    metrics = _calculate_ipsae_metrics(prediction_dir, mol_id, ligand_chain_id)
-    return metrics.get('pdockq2', np.nan)
+    metrics = _calculate_ipsae_metrics(prediction_dir, mol_id, ligand_chain_id, verbose)
+    return metrics.get('pdockq2', 0.0)
 
 
-def lis_score(prediction_dir: Path, mol_id: str, ligand_chain_id: str) -> float:
+def lis_score(prediction_dir: Path, mol_id: str, ligand_chain_id: str, verbose: bool = False) -> float:
     """Calculate LIS (Local Interaction Score) (Kim et al. 2024)
 
     Evaluates local interface quality from PAE values.
@@ -1093,11 +1100,11 @@ def lis_score(prediction_dir: Path, mol_id: str, ligand_chain_id: str) -> float:
     Returns:
         LIS score (0-1, higher = better)
     """
-    metrics = _calculate_ipsae_metrics(prediction_dir, mol_id, ligand_chain_id)
-    return metrics.get('lis_score', np.nan)
+    metrics = _calculate_ipsae_metrics(prediction_dir, mol_id, ligand_chain_id, verbose)
+    return metrics.get('lis_score', 0.0)
 
 
-def iptm_from_pae(prediction_dir: Path, mol_id: str, ligand_chain_id: str) -> float:
+def iptm_from_pae(prediction_dir: Path, mol_id: str, ligand_chain_id: str, verbose: bool = False) -> float:
     """Calculate ipTM from PAE matrix for comparison
 
     Calculates interface predicted TM-score from the PAE matrix.
@@ -1112,10 +1119,10 @@ def iptm_from_pae(prediction_dir: Path, mol_id: str, ligand_chain_id: str) -> fl
     Returns:
         ipTM score (0-1, higher = better)
     """
-    metrics = _calculate_ipsae_metrics(prediction_dir, mol_id, ligand_chain_id)
-    return metrics.get('iptm_from_pae', np.nan)
+    metrics = _calculate_ipsae_metrics(prediction_dir, mol_id, ligand_chain_id, verbose)
+    return metrics.get('iptm_from_pae', 0.0)
 
-def get_all_score(prediction_dir: Path, mol_id: str, ligand_chain_id: str) -> Optional[Dict]:
+def get_all_score(prediction_dir: Path, mol_id: str, ligand_chain_id: str, verbose: bool = False) -> Optional[Dict]:
     """Calculate ipSAE with per-residue d0 normalization (RECOMMENDED)
 
     This is the primary ipSAE metric recommended by Dunbrack 2025.
@@ -1132,5 +1139,5 @@ def get_all_score(prediction_dir: Path, mol_id: str, ligand_chain_id: str) -> Op
     Returns:
         ipSAE score (0-1, higher = better interface quality)
     """
-    metrics = _calculate_ipsae_metrics(prediction_dir, mol_id, ligand_chain_id)
+    metrics = _calculate_ipsae_metrics(prediction_dir, mol_id, ligand_chain_id, verbose)
     return metrics
